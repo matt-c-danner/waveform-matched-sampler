@@ -29,6 +29,11 @@ $PYTHON -m PyInstaller \
   -y \
   waveform_matched_sampler.py
 
+echo "==> Adding microphone permission to Info.plist..."
+/usr/libexec/PlistBuddy -c \
+  "Add :NSMicrophoneUsageDescription string 'Required for pitch detection from audio input'" \
+  "dist/Waveform Matched Sampler.app/Contents/Info.plist"
+
 echo ""
 echo "Done! Find your app at:  dist/Waveform Matched Sampler.app"
 echo ""
