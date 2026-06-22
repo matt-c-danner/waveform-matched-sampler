@@ -184,16 +184,18 @@ _KB_HINT = (
     "z = octave ↓    x = octave ↑"
 )
 
-# ── Colour palette ────────────────────────────────────────────────────────────
-BG      = "#1e1e2e"
-BG_DARK = "#11111b"
-FG      = "#cdd6f4"
-FG_DIM  = "#7f849c"
-FG_DIMR = "#585b70"
-ACCENT  = "#89b4fa"
-GREEN   = "#a6e3a1"
-SURFACE = "#313244"
-SURF2   = "#45475a"
+# ── Colour palette (Winamp 90s aesthetic) ─────────────────────────────────────
+BG      = "#1a1a1a"   # near-black body
+BG_DARK = "#0d0d0d"   # LCD inset / recessed panels
+FG      = "#b0b0b0"   # light grey general text
+FG_DIM  = "#5a5a5a"   # dimmed labels
+FG_DIMR = "#333333"   # very dim / inactive
+ACCENT  = "#00e500"   # Winamp lime green
+GREEN   = "#00e500"   # same lime for counts / active
+SURFACE = "#2a2a2a"   # raised button / panel surface
+SURF2   = "#3a3a3a"   # hover state
+BORDER  = "#444444"   # bevel highlight
+FONT_MONO = "Courier" # monospace throughout
 
 
 def _short_path(path):
@@ -221,7 +223,7 @@ class SamplerApp:
         self.reverb_wet = 0.0
         self.delay_ms = 0
         self.delay_feedback = 0.5
-        self._voice_samples = ['—'] * self.NUM_VOICES
+        self._voice_samples = ['---'] * self.NUM_VOICES
         self._voice_sound_obj = [None] * self.NUM_VOICES   # Sound playing on each voice
         self._voice_start_time = [0.0] * self.NUM_VOICES   # time.time() when it started
         self._voice_note = [-1] * self.NUM_VOICES           # MIDI note on each voice
@@ -290,234 +292,211 @@ class SamplerApp:
 
     def _build_ui(self):
         self.root.configure(bg=BG)
+        self.root.resizable(False, False)
 
-        # Title
-        tc, _ = self._text_canvas(self.root, "Waveform-Matched Sampler",
-                                   ("Helvetica", 15, "bold"), FG, height=30)
-        tc.pack(pady=(14, 4))
+        # ── Title bar ────────────────────────────────────────────────────────
+        title_c = tk.Canvas(self.root, bg=BG, width=360, height=24, highlightthickness=0)
+        title_c.pack(pady=(10, 2))
+        title_c.create_text(180, 12, text="WAVEFORM  MATCHED  SAMPLER",
+                            fill=ACCENT, font=(FONT_MONO, 11, "bold"), anchor='center')
 
-        # Note display
-        note_c = tk.Canvas(self.root, bg=BG_DARK, width=320, height=90,
-                           highlightthickness=0)
-        note_c.pack(padx=16, pady=4)
+        # ── LCD note display ─────────────────────────────────────────────────
+        lcd_border = tk.Frame(self.root, bg=BORDER, padx=1, pady=1)
+        lcd_border.pack(padx=14, pady=(2, 0))
+        note_c = tk.Canvas(lcd_border, bg=BG_DARK, width=338, height=72, highlightthickness=0)
+        note_c.pack()
         self._note_canvas = note_c
-        self._note_text_id = note_c.create_text(160, 45, text="—",
+        self._note_text_id = note_c.create_text(169, 36, text="---",
                                                  fill=ACCENT,
-                                                 font=("Helvetica", 44, "bold"),
+                                                 font=(FONT_MONO, 38, "bold"),
                                                  anchor='center')
 
-        # Status line
-        status_c = tk.Canvas(self.root, bg=BG, width=360, height=28,
-                             highlightthickness=0)
-        status_c.pack(pady=(0, 4))
+        # ── Status line ───────────────────────────────────────────────────────
+        status_c = tk.Canvas(self.root, bg=BG, width=360, height=18, highlightthickness=0)
+        status_c.pack(pady=(3, 0))
         self._status_canvas = status_c
-        self._status_text_id = status_c.create_text(180, 14, text="Starting…",
-                                                     fill=FG,
-                                                     font=("Helvetica", 11),
-                                                     anchor='center',
-                                                     width=340)
+        self._status_text_id = status_c.create_text(6, 9, text="STARTING...",
+                                                     fill=FG_DIM,
+                                                     font=(FONT_MONO, 9),
+                                                     anchor='w', width=350)
 
-        # Voice LEDs
+        # ── Voice channel indicators ──────────────────────────────────────────
         voice_row = tk.Frame(self.root, bg=BG)
-        voice_row.pack(pady=4)
-
-        vc, _ = self._text_canvas(voice_row, "Voices:", ("Helvetica", 11), FG,
-                                   width=58, height=22, anchor='w', cx=2)
-        vc.pack(side='left', padx=(0, 4))
-
+        voice_row.pack(pady=(4, 2))
+        ch_c = tk.Canvas(voice_row, bg=BG, width=36, height=16, highlightthickness=0)
+        ch_c.pack(side='left', padx=(8, 2))
+        ch_c.create_text(2, 8, text="CH:", fill=FG_DIM, font=(FONT_MONO, 8), anchor='w')
         self.voice_leds = []
         for i in range(self.NUM_VOICES):
-            lc = tk.Canvas(voice_row, bg=BG, width=30, height=22, highlightthickness=0)
+            lc = tk.Canvas(voice_row, bg=BG, width=28, height=16, highlightthickness=0)
             lc.pack(side='left', padx=2)
-            rid = lc.create_rectangle(1, 1, 29, 21, fill=SURFACE, outline="")
-            tid = lc.create_text(15, 11, text=str(i + 1), fill=FG_DIMR,
-                                 font=("Helvetica", 11, "bold"), anchor='center')
+            rid = lc.create_rectangle(1, 1, 27, 15, fill=BG_DARK, outline=BORDER)
+            tid = lc.create_text(14, 8, text=str(i + 1), fill=FG_DIMR,
+                                 font=(FONT_MONO, 8, "bold"), anchor='center')
             self.voice_leds.append({'canvas': lc, 'rect': rid, 'text': tid})
 
-        # Now Playing
-        np_frame = tk.LabelFrame(self.root, text=" Now Playing ", fg=FG,
-                                 bg=BG, font=("Helvetica", 10))
-        np_frame.pack(fill='x', padx=16, pady=(2, 6))
+        # ── Now Playing ───────────────────────────────────────────────────────
+        np_frame = tk.LabelFrame(self.root, text=" NOW PLAYING ",
+                                 fg=FG_DIM, bg=BG, font=(FONT_MONO, 7, "bold"))
+        np_frame.pack(fill='x', padx=14, pady=(2, 3))
         self._voice_label_items = []
         for i in range(self.NUM_VOICES):
             row = tk.Frame(np_frame, bg=BG)
-            row.pack(fill='x', padx=6, pady=1)
-            num_c = tk.Canvas(row, bg=BG, width=16, height=16, highlightthickness=0)
+            row.pack(fill='x', padx=4)
+            num_c = tk.Canvas(row, bg=BG, width=14, height=14, highlightthickness=0)
             num_c.pack(side='left')
-            num_c.create_text(8, 8, text=str(i + 1), fill=FG_DIMR,
-                              font=("Helvetica", 9, "bold"), anchor='center')
-            name_c = tk.Canvas(row, bg=BG, width=330, height=16, highlightthickness=0)
-            name_c.pack(side='left', padx=(2, 0))
-            tid = name_c.create_text(4, 8, text="—", fill=FG_DIM,
-                                     font=("Helvetica", 9), anchor='w')
+            num_c.create_text(7, 7, text=str(i + 1), fill=FG_DIMR,
+                              font=(FONT_MONO, 7, "bold"), anchor='center')
+            name_c = tk.Canvas(row, bg=BG, width=332, height=14, highlightthickness=0)
+            name_c.pack(side='left')
+            tid = name_c.create_text(2, 7, text="---", fill=FG_DIM,
+                                     font=(FONT_MONO, 8), anchor='w')
             self._voice_label_items.append((name_c, tid))
 
-        # Sample Bank
-        bframe = tk.LabelFrame(self.root, text=" Sample Bank ", fg=FG,
-                               bg=BG, font=("Helvetica", 10))
-        bframe.pack(fill='x', padx=16, pady=6)
+        # ── Sample Bank ───────────────────────────────────────────────────────
+        bframe = tk.LabelFrame(self.root, text=" SAMPLE BANK ",
+                               fg=FG_DIM, bg=BG, font=(FONT_MONO, 7, "bold"))
+        bframe.pack(fill='x', padx=14, pady=3)
 
-        # Bank path row
         path_row = tk.Frame(bframe, bg=BG)
-        path_row.pack(fill='x', padx=6, pady=(4, 0))
-        bank_c = tk.Canvas(path_row, bg=BG, width=248, height=20, highlightthickness=0)
+        path_row.pack(fill='x', padx=4, pady=(3, 0))
+        bank_c = tk.Canvas(path_row, bg=BG_DARK, width=258, height=16, highlightthickness=0)
         bank_c.pack(side='left')
         self._bank_canvas = bank_c
-        self._bank_text_id = bank_c.create_text(4, 10,
+        self._bank_text_id = bank_c.create_text(4, 8,
                                                   text=_short_path(DEFAULT_BANK_PATH),
                                                   fill=FG_DIM,
-                                                  font=("Helvetica", 9),
+                                                  font=(FONT_MONO, 8),
                                                   anchor='w')
-        tk.Button(path_row, text="Change…", command=self._change_bank,
-                  bg=SURFACE, fg=FG, relief='flat',
-                  activebackground=SURF2).pack(side='right', padx=4)
+        tk.Button(path_row, text="CHANGE", command=self._change_bank,
+                  bg=SURFACE, fg=FG, relief='groove', font=(FONT_MONO, 7),
+                  activebackground=SURF2, pady=0).pack(side='right')
 
-        # Sample count
-        count_c = tk.Canvas(bframe, bg=BG, width=340, height=20, highlightthickness=0)
-        count_c.pack(anchor='w', padx=8)
+        count_c = tk.Canvas(bframe, bg=BG, width=340, height=14, highlightthickness=0)
+        count_c.pack(anchor='w', padx=4)
         self._count_canvas = count_c
-        self._count_text_id = count_c.create_text(4, 10, text="",
+        self._count_text_id = count_c.create_text(2, 7, text="",
                                                    fill=GREEN,
-                                                   font=("Helvetica", 9),
+                                                   font=(FONT_MONO, 8),
                                                    anchor='w')
 
-        # Action buttons
         btn_row = tk.Frame(bframe, bg=BG)
-        btn_row.pack(fill='x', padx=6, pady=(4, 4))
-        self._add_folder_btn = tk.Button(
-            btn_row, text="+ Add Folder…", command=self._add_folder,
-            bg=SURFACE, fg=FG, relief='flat', activebackground=SURF2)
-        self._add_folder_btn.pack(side='left', padx=(0, 4))
-        self._decompose_btn = tk.Button(
-            btn_row, text="+ Decompose File…", command=self._decompose_file,
-            bg=SURFACE, fg=FG, relief='flat', activebackground=SURF2)
-        self._decompose_btn.pack(side='left', padx=4)
-        self._clear_btn = tk.Button(
-            btn_row, text="Clear Bank", command=self._clear_bank,
-            bg=SURFACE, fg=FG_DIMR, relief='flat', activebackground=SURF2)
-        self._clear_btn.pack(side='right', padx=4)
+        btn_row.pack(fill='x', padx=4, pady=(2, 2))
+        _btn_kw = dict(bg=SURFACE, relief='groove', font=(FONT_MONO, 8),
+                       activebackground=SURF2, pady=1)
+        self._add_folder_btn = tk.Button(btn_row, text="+FOLDER",
+                                         command=self._add_folder, fg=FG, **_btn_kw)
+        self._add_folder_btn.pack(side='left', padx=(0, 3))
+        self._decompose_btn = tk.Button(btn_row, text="+DECOMPOSE",
+                                        command=self._decompose_file, fg=FG, **_btn_kw)
+        self._decompose_btn.pack(side='left', padx=(0, 3))
+        self._clear_btn = tk.Button(btn_row, text="CLEAR",
+                                    command=self._clear_bank, fg=FG_DIM, **_btn_kw)
+        self._clear_btn.pack(side='right')
 
-        # Progress / bank status line
-        prog_c = tk.Canvas(bframe, bg=BG, width=340, height=18, highlightthickness=0)
-        prog_c.pack(anchor='w', padx=8, pady=(0, 4))
+        prog_c = tk.Canvas(bframe, bg=BG, width=340, height=13, highlightthickness=0)
+        prog_c.pack(anchor='w', padx=4, pady=(0, 3))
         self._prog_canvas = prog_c
-        self._prog_text_id = prog_c.create_text(4, 9, text="",
+        self._prog_text_id = prog_c.create_text(2, 6, text="",
                                                   fill=ACCENT,
-                                                  font=("Helvetica", 9),
+                                                  font=(FONT_MONO, 8),
                                                   anchor='w')
 
-        # Input mode selector
-        mframe = tk.LabelFrame(self.root, text=" Input Mode ", fg=FG,
-                               bg=BG, font=("Helvetica", 10))
-        mframe.pack(fill='x', padx=16, pady=6)
+        # ── Input Mode ────────────────────────────────────────────────────────
+        mframe = tk.LabelFrame(self.root, text=" INPUT MODE ",
+                               fg=FG_DIM, bg=BG, font=(FONT_MONO, 7, "bold"))
+        mframe.pack(fill='x', padx=14, pady=3)
         mrow = tk.Frame(mframe, bg=BG)
-        mrow.pack(padx=8, pady=6)
-        for label, val in [("Audio", "audio"), ("MIDI", "midi"), ("Keyboard", "keyboard")]:
+        mrow.pack(padx=6, pady=4)
+        for label, val in [("AUDIO", "audio"), ("MIDI", "midi"), ("KEYBOARD", "keyboard")]:
             tk.Radiobutton(mrow, text=label, variable=self.mode_var, value=val,
                            command=self._on_mode_change,
-                           bg=BG, fg=FG, selectcolor=SURFACE,
-                           activebackground=BG, activeforeground=FG,
-                           font=("Helvetica", 11)).pack(side='left', padx=14)
+                           bg=BG, fg=FG, selectcolor=BG_DARK,
+                           activebackground=BG, activeforeground=ACCENT,
+                           font=(FONT_MONO, 9)).pack(side='left', padx=10)
 
         # Input config container — one sub-frame shown at a time
         input_container = tk.Frame(self.root, bg=BG)
-        input_container.pack(fill='x', padx=16)
+        input_container.pack(fill='x', padx=14)
 
         # Audio sub-frame
-        self.audio_frame = tk.LabelFrame(input_container, text=" Audio Input ", fg=FG,
-                                         bg=BG, font=("Helvetica", 10))
+        self.audio_frame = tk.LabelFrame(input_container, text=" AUDIO INPUT ",
+                                         fg=FG_DIM, bg=BG, font=(FONT_MONO, 7, "bold"))
         self._devices = self._get_input_devices()
         self.device_var = tk.StringVar()
         audio_combo = ttk.Combobox(self.audio_frame, textvariable=self.device_var,
                                    values=[d[1] for d in self._devices],
-                                   state='readonly', width=46)
+                                   state='readonly', width=44)
         if self._devices:
             audio_combo.current(0)
-        audio_combo.pack(padx=8, pady=6)
+        audio_combo.pack(padx=6, pady=4)
 
         # MIDI sub-frame
-        self.midi_frame = tk.LabelFrame(input_container, text=" MIDI Input ", fg=FG,
-                                        bg=BG, font=("Helvetica", 10))
+        self.midi_frame = tk.LabelFrame(input_container, text=" MIDI INPUT ",
+                                        fg=FG_DIM, bg=BG, font=(FONT_MONO, 7, "bold"))
         self._midi_devices = self._get_midi_devices()
         self.midi_device_var = tk.StringVar()
         midi_row = tk.Frame(self.midi_frame, bg=BG)
-        midi_row.pack(fill='x', padx=8, pady=6)
+        midi_row.pack(fill='x', padx=6, pady=4)
         self._midi_combo = ttk.Combobox(midi_row, textvariable=self.midi_device_var,
                                         values=[d[1] for d in self._midi_devices],
-                                        state='readonly', width=36)
+                                        state='readonly', width=34)
         if self._midi_devices:
             self._midi_combo.current(0)
         else:
             self.midi_device_var.set("No MIDI input devices found")
         self._midi_combo.pack(side='left')
-        tk.Button(midi_row, text="Refresh", command=self._refresh_midi_devices,
-                  bg=SURFACE, fg=FG, relief='flat',
-                  activebackground=SURF2).pack(side='left', padx=(6, 0))
+        tk.Button(midi_row, text="REFRESH", command=self._refresh_midi_devices,
+                  bg=SURFACE, fg=FG, relief='groove', font=(FONT_MONO, 8),
+                  activebackground=SURF2, pady=0).pack(side='left', padx=(4, 0))
 
         # Keyboard sub-frame
-        self.kb_frame = tk.LabelFrame(input_container, text=" Keyboard ", fg=FG,
-                                      bg=BG, font=("Helvetica", 10))
-
-        kb_hint_c = tk.Canvas(self.kb_frame, bg=BG, width=300, height=62,
+        self.kb_frame = tk.LabelFrame(input_container, text=" KEYBOARD ",
+                                      fg=FG_DIM, bg=BG, font=(FONT_MONO, 7, "bold"))
+        kb_hint_c = tk.Canvas(self.kb_frame, bg=BG, width=310, height=56,
                               highlightthickness=0)
-        kb_hint_c.pack(anchor='w', padx=10, pady=(6, 2))
-        kb_hint_c.create_text(4, 4, text=_KB_HINT, fill=FG_DIM,
-                              font=("Courier", 10), anchor='nw')
-
-        kb_oct_c = tk.Canvas(self.kb_frame, bg=BG, width=220, height=22,
+        kb_hint_c.pack(anchor='w', padx=8, pady=(4, 1))
+        kb_hint_c.create_text(2, 2, text=_KB_HINT, fill=FG_DIM,
+                              font=(FONT_MONO, 9), anchor='nw')
+        kb_oct_c = tk.Canvas(self.kb_frame, bg=BG, width=220, height=18,
                              highlightthickness=0)
-        kb_oct_c.pack(pady=(0, 6))
+        kb_oct_c.pack(pady=(0, 4))
         self._kb_oct_canvas = kb_oct_c
-        self._kb_oct_text_id = kb_oct_c.create_text(110, 11, text="Base note: C4",
+        self._kb_oct_text_id = kb_oct_c.create_text(110, 9, text="BASE: C4",
                                                       fill=ACCENT,
-                                                      font=("Helvetica", 10, "bold"),
+                                                      font=(FONT_MONO, 9, "bold"),
                                                       anchor='center')
         self.kb_frame.pack(fill='x')  # shown by default (keyboard mode)
 
-        # Effects
-        eframe = tk.LabelFrame(self.root, text=" Effects ", fg=FG,
-                               bg=BG, font=("Helvetica", 10))
-        eframe.pack(fill='x', padx=16, pady=6)
-        erow = tk.Frame(eframe, bg=BG)
-        erow.pack(padx=8, pady=4)
+        # ── Effects ───────────────────────────────────────────────────────────
+        eframe = tk.LabelFrame(self.root, text=" EFFECTS ",
+                               fg=FG_DIM, bg=BG, font=(FONT_MONO, 7, "bold"))
+        eframe.pack(fill='x', padx=14, pady=(3, 10))
+
         def _fx_row(label, unit, from_, to, default, on_change):
             row = tk.Frame(eframe, bg=BG)
-            row.pack(fill='x', padx=8, pady=2)
-            lc = tk.Canvas(row, bg=BG, width=60, height=22, highlightthickness=0)
+            row.pack(fill='x', padx=6, pady=1)
+            lc = tk.Canvas(row, bg=BG, width=44, height=16, highlightthickness=0)
             lc.pack(side='left')
-            lc.create_text(4, 11, text=label, fill=FG, font=("Helvetica", 10), anchor='w')
+            lc.create_text(2, 8, text=label, fill=FG, font=(FONT_MONO, 9), anchor='w')
             var = tk.IntVar(value=default)
             tk.Scale(row, variable=var, from_=from_, to=to,
-                     orient='horizontal', length=230, bg=BG, fg=FG,
-                     troughcolor=SURFACE, highlightthickness=0,
+                     orient='horizontal', length=238, bg=BG, fg=ACCENT,
+                     troughcolor=BG_DARK, highlightthickness=0, showvalue=1,
+                     font=(FONT_MONO, 7),
                      command=on_change).pack(side='left')
-            uc = tk.Canvas(row, bg=BG, width=30, height=22, highlightthickness=0)
+            uc = tk.Canvas(row, bg=BG, width=26, height=16, highlightthickness=0)
             uc.pack(side='left')
-            uc.create_text(4, 11, text=unit, fill=FG, font=("Helvetica", 10), anchor='w')
+            uc.create_text(2, 8, text=unit, fill=FG_DIM, font=(FONT_MONO, 8), anchor='w')
             return var
 
-        self.reverb_var  = _fx_row("Reverb",   "%",  0, 100, 0,
-                                   lambda v: setattr(self, 'reverb_wet', int(v) / 100.0))
-        self.delay_var   = _fx_row("Delay",    "ms", 0, 1000, 0,
-                                   lambda v: setattr(self, 'delay_ms', int(v)))
-        self.feedback_var = _fx_row("Feedback", "%",  0,  90, 50,
-                                    lambda v: setattr(self, 'delay_feedback', int(v) / 100.0))
+        self.reverb_var   = _fx_row("RVB", "%",  0, 100, 0,
+                                    lambda v: setattr(self, 'reverb_wet', int(float(v)) / 100.0))
+        self.delay_var    = _fx_row("DLY", "ms", 0, 1000, 0,
+                                    lambda v: setattr(self, 'delay_ms', int(float(v))))
+        self.feedback_var = _fx_row("FBK", "%",  0,  90, 50,
+                                    lambda v: setattr(self, 'delay_feedback', int(float(v)) / 100.0))
 
-        # Retrigger interval
-        rframe = tk.LabelFrame(self.root, text=" Retrigger Interval ", fg=FG,
-                               bg=BG, font=("Helvetica", 10))
-        rframe.pack(fill='x', padx=16, pady=6)
-        rrow = tk.Frame(rframe, bg=BG)
-        rrow.pack(padx=8, pady=4)
-        self.retrigger_var = tk.IntVar(value=2000)
-        tk.Scale(rrow, variable=self.retrigger_var, from_=100, to=8000,
-                 orient='horizontal', length=260, bg=BG, fg=FG,
-                 troughcolor=SURFACE, highlightthickness=0,
-                 command=lambda v: setattr(self, 'retrigger_ms', int(v))
-                 ).pack(side='left')
-        ms_c = tk.Canvas(rrow, bg=BG, width=28, height=22, highlightthickness=0)
-        ms_c.pack(side='left')
-        ms_c.create_text(4, 11, text="ms", fill=FG, font=("Helvetica", 11), anchor='w')
 
     # ── Canvas text update helpers ────────────────────────────────────────────
 
@@ -964,7 +943,7 @@ class SamplerApp:
         self._stop_keyboard()
         self.running = False
         self.current_note = -1
-        self._set_note_text("—")
+        self._set_note_text("---")
         self._reset_leds()
 
     # ── Audio mode ───────────────────────────────────────────────────────────
@@ -1147,7 +1126,7 @@ class SamplerApp:
     def _update_kb_display(self):
         base_midi = (self.kb_octave + 1) * 12
         self._kb_oct_canvas.itemconfig(self._kb_oct_text_id,
-                                        text=f"Base note: {midi_to_name(base_midi)}")
+                                        text=f"BASE: {midi_to_name(base_midi)}")
 
     # ── Note events ──────────────────────────────────────────────────────────
 
@@ -1165,7 +1144,7 @@ class SamplerApp:
     def _on_silence(self):
         if self.current_note != -1:
             self.current_note = -1
-            self._set_note_text("—")
+            self._set_note_text("---")
             self._set_status(self._idle_status())
             self._cancel_retrigger()
 
@@ -1320,11 +1299,11 @@ class SamplerApp:
             busy = channel.get_busy()
 
             if not busy:
-                if self._voice_samples[i] != '—':
-                    self._voice_samples[i] = '—'
+                if self._voice_samples[i] != '---':
+                    self._voice_samples[i] = '---'
                     self._voice_sound_obj[i] = None
                     self._voice_note[i] = -1
-                    self._set_voice_label(i, '—', active=False)
+                    self._set_voice_label(i, '---', active=False)
                 continue
 
             # Crossfade: start next sample when this one is nearly done
