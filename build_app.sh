@@ -34,6 +34,11 @@ echo "==> Adding microphone permission to Info.plist..."
   "Add :NSMicrophoneUsageDescription string 'Required for pitch detection from audio input'" \
   "dist/Waveform Matched Sampler.app/Contents/Info.plist"
 
+echo "==> Re-signing with entitlements..."
+codesign --deep --force --sign - \
+  --entitlements entitlements.plist \
+  "dist/Waveform Matched Sampler.app"
+
 echo ""
 echo "Done! Find your app at:  dist/Waveform Matched Sampler.app"
 echo ""
