@@ -13,8 +13,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Python 3.14 and Tk
-        run: brew install python@3.14 python-tk@3.14
+      - name: Install Python 3.14, Tk, and SDL2
+        run: brew install python@3.14 python-tk@3.14 sdl2 sdl2_image sdl2_mixer sdl2_ttf portmidi
 
       - name: Build app
         run: bash build_app.sh
