@@ -95,6 +95,7 @@ except ImportError:
 SAMPLE_RATE = 44100
 HOP_SIZE = 1024
 BUFFER_SIZE = 2048
+CROSSFADE_AHEAD = 0.4   # seconds before sample end to start the next one
 
 # ── Pure-NumPy YIN pitch detector ────────────────────────────────────────────
 
@@ -221,6 +222,10 @@ class SamplerApp:
         self.delay_ms = 0
         self.delay_feedback = 0.5
         self._voice_samples = ['—'] * self.NUM_VOICES
+        self._voice_sound_obj = [None] * self.NUM_VOICES   # Sound playing on each voice
+        self._voice_start_time = [0.0] * self.NUM_VOICES   # time.time() when it started
+        self._voice_note = [-1] * self.NUM_VOICES           # MIDI note on each voice
+        self._voice_xfaded = [False] * self.NUM_VOICES      # crossfade already fired
         self.current_note = -1
         self.voice_idx = 0
         self.retrigger_ms = 2000
@@ -1166,7 +1171,7 @@ class SamplerApp:
 
     # ── Playback ─────────────────────────────────────────────────────────────
 
-    def _trigger(self, midi):
+    def _trigger(self, midi, fade_ms=0):
         sound = self._pick_sample(midi)
         if sound is None:
             name = midi_to_name(midi)
@@ -1180,7 +1185,11 @@ class SamplerApp:
         voice = self.voice_idx % self.NUM_VOICES
         self.voice_idx += 1
         channel = pygame.mixer.Channel(voice)
-        channel.play(sound)
+        channel.play(sound, fade_ms=fade_ms)
+        self._voice_sound_obj[voice] = sound
+        self._voice_start_time[voice] = time.time()
+        self._voice_note[voice] = midi
+        self._voice_xfaded[voice] = False
         name = self._sound_names.get(id(sound), '?')
         self._voice_samples[voice] = name
         self._set_voice_label(voice, name, active=True)
@@ -1305,11 +1314,36 @@ class SamplerApp:
         canvas.itemconfig(tid, text=display, fill=FG if active else FG_DIM)
 
     def _poll_voices(self):
+        now = time.time()
         for i in range(self.NUM_VOICES):
-            if self._voice_samples[i] != '—' and not pygame.mixer.Channel(i).get_busy():
-                self._voice_samples[i] = '—'
-                self._set_voice_label(i, '—', active=False)
-        self.root.after(100, self._poll_voices)
+            channel = pygame.mixer.Channel(i)
+            busy = channel.get_busy()
+
+            if not busy:
+                if self._voice_samples[i] != '—':
+                    self._voice_samples[i] = '—'
+                    self._voice_sound_obj[i] = None
+                    self._voice_note[i] = -1
+                    self._set_voice_label(i, '—', active=False)
+                continue
+
+            # Crossfade: start next sample when this one is nearly done
+            sound = self._voice_sound_obj[i]
+            note = self._voice_note[i]
+            if (sound is not None
+                    and not self._voice_xfaded[i]
+                    and note != -1
+                    and note == self.current_note):
+                length = sound.get_length()
+                elapsed = now - self._voice_start_time[i]
+                remaining = length - elapsed
+                # Only crossfade if the sample is long enough to warrant it
+                # and we're within the lookahead window
+                if length > CROSSFADE_AHEAD * 2 and 0 < remaining <= CROSSFADE_AHEAD:
+                    self._voice_xfaded[i] = True
+                    self._trigger(note)
+
+        self.root.after(50, self._poll_voices)
 
     # ── LED helpers ──────────────────────────────────────────────────────────
 
