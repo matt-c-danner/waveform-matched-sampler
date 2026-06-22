@@ -1,0 +1,19 @@
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Sample data (user-specific)
+sorted_samples/
+source_samples/
+decompose_output/
+
+# macOS
+.DS_Store
+
+# Preferences
+.waveform_matched_sampler.json
