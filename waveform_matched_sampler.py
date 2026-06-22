@@ -6,7 +6,43 @@ Detects pitch from audio input and plays a random matching sample.
 """
 
 import os
-os.environ['NUMBA_DISABLE_JIT'] = '1'  # must be set before librosa/numba import
+import sys
+import types
+
+# Inject a no-op numba stub before librosa is imported so the real numba
+# (which has version-dependent JIT internals) is never loaded at all.
+def _install_numba_stub():
+    def _noop(*args, **kwargs):
+        # Handles both @jit and @jit(nopython=True, ...) call patterns
+        if len(args) == 1 and callable(args[0]) and not kwargs:
+            return args[0]
+        return lambda f: f
+
+    class _Mod(types.ModuleType):
+        def __getattr__(self, name):
+            # Let inspect / importlib handle dunder attributes normally
+            if name.startswith('__') and name.endswith('__'):
+                raise AttributeError(name)
+            return _noop
+
+    for _name in [
+        'numba', 'numba.core', 'numba.core.types', 'numba.core.cgutils',
+        'numba.core.errors', 'numba.typed', 'numba.extending',
+        'numba.np', 'numba.np.ufunc', 'numba.types', 'llvmlite',
+        'llvmlite.binding',
+    ]:
+        _m = _Mod(_name)
+        _m.jit = _noop
+        _m.njit = _noop
+        _m.vectorize = _noop
+        _m.guvectorize = _noop
+        _m.generated_jit = _noop
+        _m.overload = _noop
+        _m.register_jitable = _noop
+        _m.prange = range
+        sys.modules[_name] = _m
+
+_install_numba_stub()
 
 import tkinter as tk
 from tkinter import filedialog, ttk
@@ -699,7 +735,11 @@ class SamplerApp:
         try:
             y, sr = librosa.load(str(src), sr=None, mono=True)
         except Exception as e:
-            self.root.after(0, self._set_progress, f"Error loading: {e}")
+            import traceback
+            with open('/tmp/wms_decompose_error.log', 'w') as _f:
+                traceback.print_exc(file=_f)
+            msg = f"{type(e).__name__}: {e}"
+            self.root.after(0, self._set_progress, f"Error loading: {msg[:80]}")
             self.root.after(0, self._set_processing, False)
             return
 

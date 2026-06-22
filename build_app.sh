@@ -17,6 +17,8 @@ $PYTHON -m PyInstaller \
   --hidden-import=pygame.pypm \
   --collect-all=pygame \
   --collect-all=librosa \
+  --collect-all=soundfile \
+  --collect-all=audioread \
   --collect-all=rtmidi \
   --exclude-module numba \
   --exclude-module llvmlite \
