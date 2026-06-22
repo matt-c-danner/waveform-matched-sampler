@@ -6,7 +6,10 @@ PYTHON=/opt/homebrew/bin/python3.14
 
 echo "==> Installing dependencies..."
 $PYTHON -m pip install --break-system-packages -r requirements.txt
-$PYTHON -m pip install --break-system-packages librosa soundfile python-rtmidi pyinstaller
+$PYTHON -m pip install --break-system-packages librosa soundfile python-rtmidi pyinstaller pillow
+
+echo "==> Generating app icon..."
+$PYTHON make_icon.py
 
 echo "==> Building .app..."
 $PYTHON -m PyInstaller \
@@ -14,6 +17,7 @@ $PYTHON -m PyInstaller \
   --windowed \
   --name "Waveform Matched Sampler" \
   --osx-bundle-identifier com.local.waveformsampler \
+  --icon AppIcon.icns \
   --hidden-import=pygame.pypm \
   --collect-all=pygame \
   --collect-all=librosa \
