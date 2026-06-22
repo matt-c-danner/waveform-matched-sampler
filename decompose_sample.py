@@ -118,7 +118,7 @@ def find_slices(y, sr, min_dur, max_dur):
     return raw_slices
 
 
-def decompose(input_file, output_dir, min_dur=0.1, max_dur=4.0,
+def decompose(input_file, output_dir, min_dur=0.5, max_dur=2.0,
               do_sort=False, dry_run=False, prefix=None):
     SUPPORTED = {'.wav', '.aif', '.aiff', '.mp3', '.flac', '.ogg', '.m4a', '.aac'}
     src = Path(input_file)
@@ -214,10 +214,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Decompose a long sample into slices.")
     parser.add_argument("input_file",  help="Source audio file")
     parser.add_argument("output_dir",  help="Destination folder")
-    parser.add_argument("--min-duration", type=float, default=0.1,
-                        metavar="SECS", help="Minimum slice duration (default 0.1)")
-    parser.add_argument("--max-duration", type=float, default=4.0,
-                        metavar="SECS", help="Maximum slice duration (default 4.0)")
+    parser.add_argument("--min-duration", type=float, default=0.5,
+                        metavar="SECS", help="Minimum slice duration (default 0.5)")
+    parser.add_argument("--max-duration", type=float, default=2.0,
+                        metavar="SECS", help="Maximum slice duration (default 2.0)")
     parser.add_argument("--sort",     action="store_true",
                         help="Detect pitch and sort into note subfolders")
     parser.add_argument("--dry-run",  action="store_true",

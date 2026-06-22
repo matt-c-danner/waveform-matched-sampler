@@ -5,17 +5,22 @@ Detects pitch from audio input and plays a random matching sample.
 4 rotating voices allow samples to overlap while a note is held.
 """
 
+import os
+os.environ['NUMBA_DISABLE_JIT'] = '1'  # must be set before librosa/numba import
+
 import tkinter as tk
 from tkinter import filedialog, ttk
 import threading
 import time
-import os
+import shutil
 import random
 import re
 import json
 from pathlib import Path
 
 PREFS_PATH = Path.home() / '.waveform_matched_sampler.json'
+DEFAULT_BANK_PATH = (Path.home() / 'Library' / 'Application Support'
+                     / 'WaveformMatchedSampler' / 'samples')
 
 try:
     import sounddevice as sd
@@ -35,6 +40,21 @@ if DEPS_OK:
         MIDI_OK = True
     except ImportError:
         pass
+
+RTMIDI_OK = False
+try:
+    import rtmidi
+    RTMIDI_OK = True
+except ImportError:
+    pass
+
+LIBROSA_OK = False
+try:
+    import librosa
+    import soundfile as sf
+    LIBROSA_OK = True
+except ImportError:
+    pass
 
 SAMPLE_RATE = 44100
 HOP_SIZE = 1024
@@ -139,6 +159,16 @@ SURFACE = "#313244"
 SURF2   = "#45475a"
 
 
+def _short_path(path):
+    p = str(path)
+    home = str(Path.home())
+    if p.startswith(home):
+        p = '~' + p[len(home):]
+    if len(p) > 42:
+        p = '…' + p[-40:]
+    return p
+
+
 class SamplerApp:
     NUM_VOICES = 4
 
@@ -166,9 +196,10 @@ class SamplerApp:
 
         # MIDI state
         self._midi_devices = []
-        self._midi_input = None
+        self._midi_input = None        # pygame.midi.Input or rtmidi.MidiIn
         self._midi_thread = None
         self._midi_running = False
+        self._rtmidi_in = None         # rtmidi.MidiIn instance kept alive while open
 
         # Keyboard state
         self.kb_octave = 4
@@ -176,13 +207,17 @@ class SamplerApp:
         self._release_timers = {}
         self._kb_bind_ids = []
 
+        # Bank state
+        self._bank_path = DEFAULT_BANK_PATH
+        self._processing = False
+
         self.mode_var = tk.StringVar(value='keyboard')
 
         if DEPS_OK:
             pygame.mixer.init(frequency=SAMPLE_RATE, size=-16, channels=2, buffer=512)
             pygame.mixer.set_num_channels(self.NUM_VOICES + 4)
             self._reverb_ir = self._build_reverb_ir()
-            if MIDI_OK:
+            if MIDI_OK and not RTMIDI_OK:
                 try:
                     pygame.midi.init()
                 except Exception:
@@ -276,26 +311,28 @@ class SamplerApp:
                                      font=("Helvetica", 9), anchor='w')
             self._voice_label_items.append((name_c, tid))
 
-        # Sample folder
-        fframe = tk.LabelFrame(self.root, text=" Sample Folder ", fg=FG,
+        # Sample Bank
+        bframe = tk.LabelFrame(self.root, text=" Sample Bank ", fg=FG,
                                bg=BG, font=("Helvetica", 10))
-        fframe.pack(fill='x', padx=16, pady=6)
+        bframe.pack(fill='x', padx=16, pady=6)
 
-        row1 = tk.Frame(fframe, bg=BG)
-        row1.pack(fill='x', padx=6, pady=(4, 0))
-
-        folder_c = tk.Canvas(row1, bg=BG, width=252, height=20, highlightthickness=0)
-        folder_c.pack(side='left')
-        self._folder_canvas = folder_c
-        self._folder_text_id = folder_c.create_text(4, 10, text="No folder selected",
-                                                     fill=FG_DIM,
-                                                     font=("Helvetica", 10),
-                                                     anchor='w')
-        tk.Button(row1, text="Browse…", command=self._browse_folder,
+        # Bank path row
+        path_row = tk.Frame(bframe, bg=BG)
+        path_row.pack(fill='x', padx=6, pady=(4, 0))
+        bank_c = tk.Canvas(path_row, bg=BG, width=248, height=20, highlightthickness=0)
+        bank_c.pack(side='left')
+        self._bank_canvas = bank_c
+        self._bank_text_id = bank_c.create_text(4, 10,
+                                                  text=_short_path(DEFAULT_BANK_PATH),
+                                                  fill=FG_DIM,
+                                                  font=("Helvetica", 9),
+                                                  anchor='w')
+        tk.Button(path_row, text="Change…", command=self._change_bank,
                   bg=SURFACE, fg=FG, relief='flat',
                   activebackground=SURF2).pack(side='right', padx=4)
 
-        count_c = tk.Canvas(fframe, bg=BG, width=340, height=20, highlightthickness=0)
+        # Sample count
+        count_c = tk.Canvas(bframe, bg=BG, width=340, height=20, highlightthickness=0)
         count_c.pack(anchor='w', padx=8)
         self._count_canvas = count_c
         self._count_text_id = count_c.create_text(4, 10, text="",
@@ -303,12 +340,30 @@ class SamplerApp:
                                                    font=("Helvetica", 9),
                                                    anchor='w')
 
-        hint = ("Folder layout:  samples/60/  or  samples/C4/  → wav files inside\n"
-                "Flat files also work:  60.wav  C4_violin.wav  F#3.wav")
-        hint_c = tk.Canvas(fframe, bg=BG, width=360, height=36, highlightthickness=0)
-        hint_c.pack(anchor='w', padx=8, pady=(2, 6))
-        hint_c.create_text(4, 4, text=hint, fill=FG_DIMR,
-                           font=("Helvetica", 9), anchor='nw')
+        # Action buttons
+        btn_row = tk.Frame(bframe, bg=BG)
+        btn_row.pack(fill='x', padx=6, pady=(4, 4))
+        self._add_folder_btn = tk.Button(
+            btn_row, text="+ Add Folder…", command=self._add_folder,
+            bg=SURFACE, fg=FG, relief='flat', activebackground=SURF2)
+        self._add_folder_btn.pack(side='left', padx=(0, 4))
+        self._decompose_btn = tk.Button(
+            btn_row, text="+ Decompose File…", command=self._decompose_file,
+            bg=SURFACE, fg=FG, relief='flat', activebackground=SURF2)
+        self._decompose_btn.pack(side='left', padx=4)
+        self._clear_btn = tk.Button(
+            btn_row, text="Clear Bank", command=self._clear_bank,
+            bg=SURFACE, fg=FG_DIMR, relief='flat', activebackground=SURF2)
+        self._clear_btn.pack(side='right', padx=4)
+
+        # Progress / bank status line
+        prog_c = tk.Canvas(bframe, bg=BG, width=340, height=18, highlightthickness=0)
+        prog_c.pack(anchor='w', padx=8, pady=(0, 4))
+        self._prog_canvas = prog_c
+        self._prog_text_id = prog_c.create_text(4, 9, text="",
+                                                  fill=ACCENT,
+                                                  font=("Helvetica", 9),
+                                                  anchor='w')
 
         # Input mode selector
         mframe = tk.LabelFrame(self.root, text=" Input Mode ", fg=FG,
@@ -344,14 +399,19 @@ class SamplerApp:
                                         bg=BG, font=("Helvetica", 10))
         self._midi_devices = self._get_midi_devices()
         self.midi_device_var = tk.StringVar()
-        midi_combo = ttk.Combobox(self.midi_frame, textvariable=self.midi_device_var,
-                                  values=[d[1] for d in self._midi_devices],
-                                  state='readonly', width=46)
+        midi_row = tk.Frame(self.midi_frame, bg=BG)
+        midi_row.pack(fill='x', padx=8, pady=6)
+        self._midi_combo = ttk.Combobox(midi_row, textvariable=self.midi_device_var,
+                                        values=[d[1] for d in self._midi_devices],
+                                        state='readonly', width=36)
         if self._midi_devices:
-            midi_combo.current(0)
+            self._midi_combo.current(0)
         else:
             self.midi_device_var.set("No MIDI input devices found")
-        midi_combo.pack(padx=8, pady=6)
+        self._midi_combo.pack(side='left')
+        tk.Button(midi_row, text="Refresh", command=self._refresh_midi_devices,
+                  bg=SURFACE, fg=FG, relief='flat',
+                  activebackground=SURF2).pack(side='left', padx=(6, 0))
 
         # Keyboard sub-frame
         self.kb_frame = tk.LabelFrame(input_container, text=" Keyboard ", fg=FG,
@@ -426,6 +486,9 @@ class SamplerApp:
     def _set_status(self, text):
         self._status_canvas.itemconfig(self._status_text_id, text=text)
 
+    def _set_progress(self, text):
+        self._prog_canvas.itemconfig(self._prog_text_id, text=text)
+
     # ── Mode switching ────────────────────────────────────────────────────────
 
     def _on_mode_change(self):
@@ -466,6 +529,14 @@ class SamplerApp:
         return devices
 
     def _get_midi_devices(self):
+        if RTMIDI_OK:
+            try:
+                tmp = rtmidi.MidiIn()
+                ports = tmp.get_ports()
+                del tmp
+                return list(enumerate(ports))
+            except Exception:
+                return []
         if not MIDI_OK:
             return []
         devices = []
@@ -478,27 +549,298 @@ class SamplerApp:
             pass
         return devices
 
-    # ── Sample loading ────────────────────────────────────────────────────────
+    def _refresh_midi_devices(self):
+        self._stop_midi()
+        if RTMIDI_OK:
+            # rtmidi rescans automatically on each MidiIn() instantiation
+            pass
+        elif MIDI_OK:
+            try:
+                pygame.midi.quit()
+                pygame.midi.init()
+            except Exception:
+                pass
+        self._midi_devices = self._get_midi_devices()
+        names = [d[1] for d in self._midi_devices]
+        self._midi_combo['values'] = names
+        if self._midi_devices:
+            self._midi_combo.current(0)
+            self._set_status(f"Found {len(self._midi_devices)} MIDI input device(s).")
+        else:
+            self.midi_device_var.set("No MIDI input devices found")
+            self._set_status("No MIDI input devices found.")
+
+    # ── Sample Bank ──────────────────────────────────────────────────────────
 
     def _save_prefs(self, folder):
         try:
-            PREFS_PATH.write_text(json.dumps({'sample_folder': folder}))
+            PREFS_PATH.write_text(json.dumps({'bank_path': folder}))
         except Exception:
             pass
 
     def _load_prefs(self):
+        folder = None
         try:
             prefs = json.loads(PREFS_PATH.read_text())
-            folder = prefs.get('sample_folder')
-            if folder and Path(folder).is_dir():
-                self._load_folder(folder)
+            folder = prefs.get('bank_path') or prefs.get('sample_folder')
         except Exception:
             pass
-
-    def _browse_folder(self):
-        folder = filedialog.askdirectory(title="Select Sample Folder")
-        if folder:
+        if folder and Path(folder).is_dir():
+            self._bank_path = Path(folder)
             self._load_folder(folder)
+        elif DEFAULT_BANK_PATH.is_dir():
+            self._bank_path = DEFAULT_BANK_PATH
+            self._load_folder(str(DEFAULT_BANK_PATH))
+
+    def _change_bank(self):
+        folder = filedialog.askdirectory(title="Select Bank Location")
+        if folder:
+            self._bank_path = Path(folder)
+            self._load_folder(folder)
+
+    def _set_processing(self, state):
+        self._processing = state
+        s = 'disabled' if state else 'normal'
+        self._add_folder_btn.config(state=s)
+        self._decompose_btn.config(state=s)
+        self._clear_btn.config(state=s)
+
+    def _add_folder(self):
+        if self._processing:
+            return
+        if not LIBROSA_OK:
+            import tkinter.messagebox as mb
+            mb.showerror("Missing librosa",
+                         "Install librosa and soundfile:\n  pip install librosa soundfile")
+            return
+        folder = filedialog.askdirectory(title="Select Folder to Add to Bank")
+        if not folder:
+            return
+        self._set_processing(True)
+        self._set_progress("Starting…")
+        threading.Thread(target=self._add_folder_worker, args=(folder,), daemon=True).start()
+
+    def _add_folder_worker(self, folder):
+        import numpy as _np
+        AUDIO_EXT = {'.wav', '.aif', '.aiff', '.mp3', '.flac', '.ogg', '.m4a', '.aac'}
+        NEEDS_CONV = {'.mp3', '.flac', '.ogg', '.m4a', '.aac'}
+
+        src = Path(folder)
+        files = sorted(f for f in src.rglob('*')
+                       if f.is_file() and f.suffix.lower() in AUDIO_EXT)
+
+        if not files:
+            self.root.after(0, self._set_progress, "No audio files found.")
+            self.root.after(0, self._set_processing, False)
+            return
+
+        self._bank_path.mkdir(parents=True, exist_ok=True)
+        done = 0
+
+        for i, fp in enumerate(files, 1):
+            self.root.after(0, self._set_progress,
+                            f"Detecting pitch: {fp.name} ({i}/{len(files)})…")
+            midi = self._detect_pitch_lib(fp)
+            if midi is None:
+                folder_out = self._bank_path / '_undetected'
+            else:
+                folder_out = self._bank_path / midi_to_name(midi)
+            folder_out.mkdir(parents=True, exist_ok=True)
+
+            out_suffix = '.wav' if fp.suffix.lower() in NEEDS_CONV else fp.suffix
+            dest = folder_out / (fp.stem + out_suffix)
+            n = 1
+            while dest.exists():
+                dest = folder_out / f"{fp.stem}_{n}{out_suffix}"
+                n += 1
+
+            if fp.suffix.lower() in NEEDS_CONV:
+                y, sr = librosa.load(str(fp), sr=None, mono=False)
+                if y.ndim > 1:
+                    y = y.T
+                sf.write(str(dest), y, sr)
+            else:
+                shutil.copy2(fp, dest)
+            done += 1
+
+        self.root.after(0, self._set_progress, f"Added {done} file(s) to bank.")
+        self.root.after(0, self._load_folder, str(self._bank_path))
+        self.root.after(0, self._set_processing, False)
+
+    def _decompose_file(self):
+        if self._processing:
+            return
+        if not LIBROSA_OK:
+            import tkinter.messagebox as mb
+            mb.showerror("Missing librosa",
+                         "Install librosa and soundfile:\n  pip install librosa soundfile")
+            return
+        filetypes = [
+            ("Audio files", "*.wav *.aif *.aiff *.mp3 *.flac *.ogg *.m4a *.aac"),
+            ("All files", "*.*"),
+        ]
+        filepath = filedialog.askopenfilename(
+            title="Select Audio File to Decompose", filetypes=filetypes)
+        if not filepath:
+            return
+        self._set_processing(True)
+        self._set_progress("Starting…")
+        threading.Thread(target=self._decompose_worker, args=(filepath,), daemon=True).start()
+
+    def _decompose_worker(self, filepath):
+        import warnings
+        import numpy as _np
+        warnings.filterwarnings('ignore', category=UserWarning)
+        warnings.filterwarnings('ignore', category=FutureWarning)
+
+        src = Path(filepath)
+        self.root.after(0, self._set_progress, f"Loading {src.name}…")
+
+        try:
+            y, sr = librosa.load(str(src), sr=None, mono=True)
+        except Exception as e:
+            self.root.after(0, self._set_progress, f"Error loading: {e}")
+            self.root.after(0, self._set_processing, False)
+            return
+
+        self.root.after(0, self._set_progress, "Detecting onsets…")
+        slices = self._find_slices(y, sr)
+
+        if not slices:
+            self.root.after(0, self._set_progress, "No slices detected.")
+            self.root.after(0, self._set_processing, False)
+            return
+
+        self._bank_path.mkdir(parents=True, exist_ok=True)
+        stem = src.stem
+        done = 0
+
+        for i, (start, end) in enumerate(slices, 1):
+            seg = y[start:end]
+            self.root.after(0, self._set_progress,
+                            f"Processing slice {i}/{len(slices)}…")
+            midi = self._detect_pitch_seg(seg, sr)
+            if midi is None:
+                folder_out = self._bank_path / '_undetected'
+            else:
+                folder_out = self._bank_path / midi_to_name(midi)
+            folder_out.mkdir(parents=True, exist_ok=True)
+
+            filename = f"{stem}_{i:03d}.wav"
+            dest = folder_out / filename
+            n = 1
+            while dest.exists():
+                dest = folder_out / f"{stem}_{i:03d}_{n}.wav"
+                n += 1
+
+            # Load stereo slice for output
+            y_slice, _ = librosa.load(str(src), sr=sr, mono=False,
+                                       offset=start / sr,
+                                       duration=(end - start) / sr)
+            if y_slice.ndim == 1:
+                sf.write(str(dest), self._fade_edges(y_slice, sr), sr)
+            else:
+                faded = _np.stack([self._fade_edges(y_slice[ch], sr)
+                                   for ch in range(y_slice.shape[0])], axis=1)
+                sf.write(str(dest), faded, sr)
+            done += 1
+
+        self.root.after(0, self._set_progress,
+                        f"Added {done} slice(s) from {src.name}.")
+        self.root.after(0, self._load_folder, str(self._bank_path))
+        self.root.after(0, self._set_processing, False)
+
+    def _clear_bank(self):
+        import tkinter.messagebox as mb
+        if not mb.askyesno("Clear Bank",
+                           "Delete all samples from the bank?\nThis cannot be undone."):
+            return
+        try:
+            if self._bank_path.is_dir():
+                shutil.rmtree(self._bank_path)
+            self._bank_path.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            self._set_status(f"Clear failed: {e}")
+            return
+        self.sample_db = {}
+        self._sound_names = {}
+        self._fx_cache = {}
+        self._count_canvas.itemconfig(self._count_text_id, text="Bank cleared.")
+        self._set_status("Sample bank cleared.")
+
+    # ── Pitch / onset helpers (librosa-based) ─────────────────────────────────
+
+    def _detect_pitch_lib(self, filepath):
+        """Pitch-detect a file with librosa. Returns MIDI int or None."""
+        try:
+            y, sr = librosa.load(str(filepath), duration=4.0, mono=True)
+            return self._detect_pitch_seg(y, sr)
+        except Exception:
+            return None
+
+    def _detect_pitch_seg(self, y, sr):
+        """Pitch-detect a numpy audio array. Returns MIDI int or None."""
+        import numpy as _np
+        try:
+            y_harm = librosa.effects.harmonic(y)
+            pitches, mags = librosa.piptrack(y=y_harm, sr=sr, threshold=0.1)
+            hits = []
+            for t in range(pitches.shape[1]):
+                idx = mags[:, t].argmax()
+                freq = pitches[idx, t]
+                mag = mags[idx, t]
+                if 20.0 < freq < 8000.0:
+                    hits.append((freq, mag))
+            if not hits:
+                return None
+            hits.sort(key=lambda x: x[1], reverse=True)
+            top = [h[0] for h in hits[:max(1, len(hits) // 3)]]
+            midi = round(69 + 12 * _np.log2(_np.median(top) / 440.0))
+            return int(midi) if 0 <= midi <= 127 else None
+        except Exception:
+            return None
+
+    def _find_slices(self, y, sr, min_dur=0.5, max_dur=2.0):
+        """Return list of (start_sample, end_sample) tuples via onset detection."""
+        import numpy as _np
+        onset_frames = librosa.onset.onset_detect(
+            y=y, sr=sr, backtrack=True,
+            pre_max=3, post_max=3, pre_avg=5, post_avg=5, delta=0.07, wait=10
+        )
+        onset_samples = librosa.frames_to_samples(onset_frames).tolist()
+        boundaries = sorted(set([0] + onset_samples + [len(y)]))
+        min_samp = int(min_dur * sr)
+        max_samp = int(max_dur * sr)
+        raw_slices = []
+        for i in range(len(boundaries) - 1):
+            start, end = boundaries[i], boundaries[i + 1]
+            if end - start < min_samp:
+                continue
+            length = end - start
+            if length > max_samp:
+                n_chunks = int(_np.ceil(length / max_samp))
+                chunk_len = length // n_chunks
+                for c in range(n_chunks):
+                    cs = start + c * chunk_len
+                    ce = cs + chunk_len if c < n_chunks - 1 else end
+                    if ce - cs >= min_samp:
+                        raw_slices.append((cs, ce))
+            else:
+                raw_slices.append((start, end))
+        return raw_slices
+
+    def _fade_edges(self, audio, sr, fade_in=0.005, fade_out=0.03):
+        import numpy as _np
+        n_in  = min(int(sr * fade_in),  len(audio) // 4)
+        n_out = min(int(sr * fade_out), len(audio) // 4)
+        result = audio.copy()
+        if n_in > 0:
+            result[:n_in]  *= _np.linspace(0.0, 1.0, n_in)
+        if n_out > 0:
+            result[-n_out:] *= _np.linspace(1.0, 0.0, n_out)
+        return result
+
+    # ── Sample loading ────────────────────────────────────────────────────────
 
     def _load_folder(self, folder):
         self.sample_db = {}
@@ -533,14 +875,14 @@ class SamplerApp:
 
         total = sum(len(v) for v in self.sample_db.values())
         notes = len(self.sample_db)
-        self._folder_canvas.itemconfig(self._folder_text_id,
-                                       text=os.path.basename(folder))
+        self._bank_canvas.itemconfig(self._bank_text_id,
+                                     text=_short_path(folder))
         self._count_canvas.itemconfig(self._count_text_id,
                                       text=f"{total} samples across {notes} notes loaded")
         if total == 0 and errors:
             self._set_status(f"Failed to load samples: {errors[0]}")
         elif total == 0:
-            self._set_status("No recognisable samples found in that folder.")
+            self._set_status("No recognisable samples found in bank.")
         else:
             self._set_status(f"Loaded {total} samples for {notes} MIDI notes.")
             self._save_prefs(folder)
@@ -631,7 +973,7 @@ class SamplerApp:
 
     def _start_midi(self):
         if not self._midi_devices:
-            self._set_status("No MIDI input devices found.")
+            self._set_status("No MIDI input devices found. Click Refresh.")
             return
         device_idx = None
         selected = self.midi_device_var.get()
@@ -643,7 +985,12 @@ class SamplerApp:
             self._set_status("Select a MIDI input device first.")
             return
         try:
-            self._midi_input = pygame.midi.Input(device_idx)
+            if RTMIDI_OK:
+                self._rtmidi_in = rtmidi.MidiIn()
+                self._rtmidi_in.open_port(device_idx)
+                self._rtmidi_in.ignore_types(sysex=True, timing=True, active_sense=True)
+            else:
+                self._midi_input = pygame.midi.Input(device_idx)
             self._midi_running = True
             self._midi_thread = threading.Thread(target=self._midi_poll_loop, daemon=True)
             self._midi_thread.start()
@@ -655,15 +1002,27 @@ class SamplerApp:
     def _midi_poll_loop(self):
         while self._midi_running:
             try:
-                if self._midi_input and self._midi_input.poll():
-                    for event in self._midi_input.read(16):
-                        status = event[0][0] & 0xF0
-                        note   = event[0][1]
-                        vel    = event[0][2]
+                if RTMIDI_OK:
+                    msg = self._rtmidi_in.get_message() if self._rtmidi_in else None
+                    if msg:
+                        data, _ = msg
+                        status = data[0] & 0xF0
+                        note   = data[1] if len(data) > 1 else 0
+                        vel    = data[2] if len(data) > 2 else 0
                         if status == 0x90 and vel > 0:
                             self.root.after(0, self._on_note, note)
                         elif status == 0x80 or (status == 0x90 and vel == 0):
                             self.root.after(0, self._on_midi_note_off, note)
+                else:
+                    if self._midi_input and self._midi_input.poll():
+                        for event in self._midi_input.read(16):
+                            status = event[0][0] & 0xF0
+                            note   = event[0][1]
+                            vel    = event[0][2]
+                            if status == 0x90 and vel > 0:
+                                self.root.after(0, self._on_note, note)
+                            elif status == 0x80 or (status == 0x90 and vel == 0):
+                                self.root.after(0, self._on_midi_note_off, note)
             except Exception:
                 break
             time.sleep(0.001)
@@ -674,6 +1033,12 @@ class SamplerApp:
 
     def _stop_midi(self):
         self._midi_running = False
+        if self._rtmidi_in:
+            try:
+                self._rtmidi_in.close_port()
+            except Exception:
+                pass
+            self._rtmidi_in = None
         if self._midi_input:
             try:
                 self._midi_input.close()
@@ -938,7 +1303,7 @@ class SamplerApp:
         self._stop()
         if DEPS_OK:
             pygame.mixer.quit()
-            if MIDI_OK:
+            if MIDI_OK and not RTMIDI_OK:
                 try:
                     pygame.midi.quit()
                 except Exception:
