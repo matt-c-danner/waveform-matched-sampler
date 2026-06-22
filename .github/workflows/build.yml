@@ -19,6 +19,10 @@ jobs:
       - name: Build app
         run: bash build_app.sh
 
+      - name: Ad-hoc sign app
+        # Required for Apple Silicon; lets recipients open via right-click → Open
+        run: codesign --deep --force --sign - "dist/Waveform Matched Sampler.app"
+
       - name: Package .app for upload
         # ditto preserves macOS resource forks, symlinks, and extended attributes
         run: |
