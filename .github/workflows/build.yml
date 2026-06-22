@@ -19,52 +19,13 @@ jobs:
       - name: Build app
         run: bash build_app.sh
 
-      - name: Import Developer ID certificate
-        env:
-          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
-        run: |
-          echo "$MACOS_CERTIFICATE" | base64 --decode -o certificate.p12
-          security create-keychain -p ci-keychain-password build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p ci-keychain-password build.keychain
-          security import certificate.p12 -k build.keychain \
-            -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: \
-            -s -k ci-keychain-password build.keychain
-          rm certificate.p12
+      - name: Ad-hoc sign app
+        # Required for Apple Silicon; recipients open via right-click → Open
+        run: codesign --deep --force --sign - "dist/Waveform Matched Sampler.app"
 
-      - name: Sign app
+      - name: Package .app for upload
+        # ditto preserves macOS resource forks, symlinks, and extended attributes
         run: |
-          codesign --deep --force --options runtime \
-            --entitlements entitlements.plist \
-            --sign "Developer ID Application" \
-            "dist/Waveform Matched Sampler.app"
-
-      - name: Package for notarization
-        run: |
-          ditto -c -k --sequesterRsrc --keepParent \
-            "dist/Waveform Matched Sampler.app" \
-            "dist/Waveform Matched Sampler.zip"
-
-      - name: Notarize app
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          xcrun notarytool submit "dist/Waveform Matched Sampler.zip" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_ID_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait
-
-      - name: Staple notarization ticket
-        run: xcrun stapler staple "dist/Waveform Matched Sampler.app"
-
-      - name: Repackage stapled app
-        run: |
-          rm "dist/Waveform Matched Sampler.zip"
           ditto -c -k --sequesterRsrc --keepParent \
             "dist/Waveform Matched Sampler.app" \
             "dist/Waveform Matched Sampler.zip"
