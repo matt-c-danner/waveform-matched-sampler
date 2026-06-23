@@ -218,6 +218,8 @@ class SamplerApp:
         self.sample_db = {}
         self._sound_names = {}          # id(Sound) → filename
         self._fx_cache = {}             # (sound_id, reverb, delay_ms, feedback) → Sound
+        self._shift_cache = {}          # (sound_id, semitones) → Sound
+        self._pitch_shift_enabled = False
         self._reverb_ir = None
         self._reverb_ir_ffts = {}       # fft_len → rfft(ir, n=fft_len)
         self.reverb_wet = 0.0
@@ -496,6 +498,19 @@ class SamplerApp:
                                     lambda v: setattr(self, 'delay_ms', int(float(v))))
         self.feedback_var = _fx_row("FBK", "%",  0,  90, 50,
                                     lambda v: setattr(self, 'delay_feedback', int(float(v)) / 100.0))
+
+        ps_row = tk.Frame(eframe, bg=BG)
+        ps_row.pack(fill='x', padx=6, pady=(2, 4))
+        ps_lc = tk.Canvas(ps_row, bg=BG, width=44, height=16, highlightthickness=0)
+        ps_lc.pack(side='left')
+        ps_lc.create_text(2, 8, text="PSH", fill=FG, font=(FONT_MONO, 9), anchor='w')
+        self._pitch_shift_btn = tk.Button(
+            ps_row, text="OFF", width=6,
+            command=self._toggle_pitch_shift,
+            fg=FG_DIM, bg=SURF2, relief='groove',
+            font=(FONT_MONO, 8), bd=1, activebackground=SURF2,
+        )
+        self._pitch_shift_btn.pack(side='left', padx=(4, 0))
 
 
     # ── Canvas text update helpers ────────────────────────────────────────────
@@ -882,6 +897,7 @@ class SamplerApp:
         self.sample_db = {}
         self._sound_names = {}
         self._fx_cache = {}
+        self._shift_cache = {}
         path = Path(folder)
         exts = {'.wav', '.aif', '.aiff'}
         errors = []
@@ -1178,7 +1194,7 @@ class SamplerApp:
     # ── Playback ─────────────────────────────────────────────────────────────
 
     def _trigger(self, midi, fade_ms=0):
-        sound = self._pick_sample(midi)
+        sound, source_midi = self._pick_sample(midi)
         if sound is None:
             name = midi_to_name(midi)
             if not self.sample_db:
@@ -1186,6 +1202,8 @@ class SamplerApp:
             else:
                 self._set_status(f"{name} ({midi}) — no matching sample found.")
             return
+        if self._pitch_shift_enabled and source_midi is not None and source_midi != midi:
+            sound = self._pitch_shift_sound(sound, midi - source_midi)
         if self.reverb_wet > 0 or self.delay_ms > 0:
             sound = self._get_processed_sound(sound)
         voice = self.voice_idx % self.NUM_VOICES
@@ -1202,19 +1220,55 @@ class SamplerApp:
         self._flash_led(voice)
 
     def _pick_sample(self, midi):
+        """Returns (sound, source_midi) or (None, None)."""
         if midi in self.sample_db:
-            return random.choice(self.sample_db[midi])
-        best, best_dist = None, 999
+            return random.choice(self.sample_db[midi]), midi
+        best_note, best, best_dist = None, None, 999
         for note, sounds in self.sample_db.items():
             d = abs(note - midi)
             if d < best_dist and sounds:
-                best_dist, best = d, sounds
+                best_dist, best_note, best = d, note, sounds
         if best and best_dist <= 12:
-            return random.choice(best)
+            return random.choice(best), best_note
         pitch_class = midi % 12
-        same_class = [s for note, sounds in self.sample_db.items()
-                      if note % 12 == pitch_class for s in sounds]
-        return random.choice(same_class) if same_class else None
+        for note, sounds in self.sample_db.items():
+            if note % 12 == pitch_class and sounds:
+                return random.choice(sounds), note
+        return None, None
+
+    def _toggle_pitch_shift(self):
+        self._pitch_shift_enabled = not self._pitch_shift_enabled
+        self._shift_cache.clear()
+        if self._pitch_shift_enabled:
+            self._pitch_shift_btn.config(text="ON", fg=ACCENT, bg=BG_DARK)
+        else:
+            self._pitch_shift_btn.config(text="OFF", fg=FG_DIM, bg=SURF2)
+
+    def _pitch_shift_sound(self, sound, semitones):
+        """Resample sound to shift pitch by semitones (tape-speed method). Cached."""
+        if semitones == 0:
+            return sound
+        cache_key = (id(sound), semitones)
+        if cache_key in self._shift_cache:
+            return self._shift_cache[cache_key]
+        arr = pygame.sndarray.array(sound)
+        factor = 2.0 ** (-semitones / 12.0)
+        orig_len = arr.shape[0]
+        new_len = max(1, int(round(orig_len * factor)))
+        old_x = np.arange(orig_len, dtype=np.float32)
+        new_x = np.linspace(0, orig_len - 1, new_len, dtype=np.float32)
+        if arr.ndim == 1:
+            resampled = np.interp(new_x, old_x, arr.astype(np.float32)).astype(arr.dtype)
+        else:
+            resampled = np.column_stack([
+                np.interp(new_x, old_x, arr[:, ch].astype(np.float32)).astype(arr.dtype)
+                for ch in range(arr.shape[1])
+            ])
+        shifted = pygame.sndarray.make_sound(resampled)
+        base_name = self._sound_names.get(id(sound), '?')
+        self._sound_names[id(shifted)] = f"{base_name}[{semitones:+d}]"
+        self._shift_cache[cache_key] = shifted
+        return shifted
 
     def _schedule_retrigger(self, midi):
         def fire():
