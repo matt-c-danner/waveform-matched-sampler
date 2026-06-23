@@ -797,7 +797,7 @@ class SamplerApp:
     def _detect_pitch_lib(self, filepath):
         """Pitch-detect a file with librosa. Returns MIDI int or None."""
         try:
-            y, sr = librosa.load(str(filepath), duration=4.0, mono=True)
+            y, sr = librosa.load(str(filepath), mono=True)
             return self._detect_pitch_seg(y, sr)
         except Exception:
             return None
@@ -806,14 +806,26 @@ class SamplerApp:
         """Pitch-detect a numpy audio array. Returns MIDI int or None."""
         import numpy as _np
         try:
+            # YIN is far more reliable than piptrack for monophonic samples
+            f0 = librosa.yin(y, fmin=65.0, fmax=2100.0, sr=sr)
+            voiced = f0[(f0 > 65.0) & (f0 < 2100.0)]
+            if len(voiced) > 0:
+                freq = float(_np.median(voiced))
+                midi = round(69 + 12 * _np.log2(freq / 440.0))
+                if 0 <= midi <= 127:
+                    return int(midi)
+        except Exception:
+            pass
+        try:
+            # Fallback: piptrack on harmonic component with lower threshold
             y_harm = librosa.effects.harmonic(y)
-            pitches, mags = librosa.piptrack(y=y_harm, sr=sr, threshold=0.1)
+            pitches, mags = librosa.piptrack(y=y_harm, sr=sr, threshold=0.05)
             hits = []
             for t in range(pitches.shape[1]):
                 idx = mags[:, t].argmax()
                 freq = pitches[idx, t]
                 mag = mags[idx, t]
-                if 20.0 < freq < 8000.0:
+                if 20.0 < freq < 8000.0 and mag > 0:
                     hits.append((freq, mag))
             if not hits:
                 return None
@@ -897,6 +909,18 @@ class SamplerApp:
                     if sounds:
                         self.sample_db.setdefault(midi, []).extend(sounds)
 
+        # Layout 3: _undetected subfolder — map to C4 (60) as fallback
+        undetected_dir = path / '_undetected'
+        n_undetected = 0
+        if undetected_dir.is_dir():
+            files = [f for f in undetected_dir.iterdir() if f.suffix.lower() in exts]
+            if files:
+                sounds, errs = self._load_sounds(files)
+                errors.extend(errs)
+                if sounds:
+                    self.sample_db.setdefault(60, []).extend(sounds)
+                    n_undetected = len(sounds)
+
         total = sum(len(v) for v in self.sample_db.values())
         notes = len(self.sample_db)
         self._bank_canvas.itemconfig(self._bank_text_id,
@@ -908,7 +932,10 @@ class SamplerApp:
         elif total == 0:
             self._set_status("No recognisable samples found in bank.")
         else:
-            self._set_status(f"Loaded {total} samples for {notes} MIDI notes.")
+            msg = f"Loaded {total} samples for {notes} MIDI notes."
+            if n_undetected:
+                msg += f" ({n_undetected} undetected → C4)"
+            self._set_status(msg)
             self._save_prefs(folder)
 
     def _load_sounds(self, files):
