@@ -228,6 +228,7 @@ class SamplerApp:
         self.reverb_wet = 0.0
         self.delay_ms = 0
         self.delay_feedback = 0.5
+        self.dry_mix = 0.0
         self._voice_samples = ['---'] * self.NUM_VOICES
         self._voice_sound_obj = [None] * self.NUM_VOICES   # Sound playing on each voice
         self._voice_start_time = [0.0] * self.NUM_VOICES   # time.time() when it started
@@ -297,7 +298,11 @@ class SamplerApp:
 
     def _build_ui(self):
         self.root.configure(bg=BG)
-        self.root.resizable(False, False)
+        self.root.resizable(True, True)
+        self.root.minsize(400, 600)
+        self.root.bind_all('<Command-f>', lambda e: self._toggle_fullscreen())
+        self.root.bind_all('<F11>',       lambda e: self._toggle_fullscreen())
+        self.root.bind_all('<Escape>',    lambda e: self._exit_fullscreen())
 
         # ── Title bar ────────────────────────────────────────────────────────
         title_c = tk.Canvas(self.root, bg=BG, width=360, height=24, highlightthickness=0)
@@ -495,6 +500,8 @@ class SamplerApp:
             uc.create_text(2, 8, text=unit, fill=FG_DIM, font=(FONT_MONO, 8), anchor='w')
             return var
 
+        self.dry_var      = _fx_row("DRY", "%",  0, 100, 0,
+                                    lambda v: setattr(self, 'dry_mix', int(float(v)) / 100.0))
         self.reverb_var   = _fx_row("RVB", "%",  0, 100, 0,
                                     lambda v: setattr(self, 'reverb_wet', int(float(v)) / 100.0))
         self.delay_var    = _fx_row("DLY", "ms", 0, 1000, 0,
@@ -540,6 +547,19 @@ class SamplerApp:
             font=(FONT_MONO, 8), bd=1, activebackground=SURF2,
         )
         self._hold_btn.pack(side='left', padx=(4, 0))
+
+        full_row = tk.Frame(eframe, bg=BG)
+        full_row.pack(fill='x', padx=6, pady=(0, 4))
+        full_lc = tk.Canvas(full_row, bg=BG, width=44, height=16, highlightthickness=0)
+        full_lc.pack(side='left')
+        full_lc.create_text(2, 8, text="FULL", fill=FG, font=(FONT_MONO, 9), anchor='w')
+        self._full_btn = tk.Button(
+            full_row, text="OFF", width=6,
+            command=self._toggle_fullscreen,
+            fg=FG_DIM, bg=SURF2, relief='groove',
+            font=(FONT_MONO, 8), bd=1, activebackground=SURF2,
+        )
+        self._full_btn.pack(side='left', padx=(4, 0))
 
 
     # ── Canvas text update helpers ────────────────────────────────────────────
@@ -1030,12 +1050,12 @@ class SamplerApp:
                 break
         try:
             self._audio_buf = np.zeros(0, dtype=np.float32)
-            self.stream = sd.InputStream(
-                device=device_idx,
-                channels=1,
+            self.stream = sd.Stream(
+                device=(device_idx, None),
                 samplerate=SAMPLE_RATE,
                 blocksize=HOP_SIZE,
                 dtype='float32',
+                channels=(1, 2),
                 callback=self._audio_callback,
             )
             self.stream.start()
@@ -1044,7 +1064,13 @@ class SamplerApp:
         except Exception as e:
             self._set_status(f"Error opening audio: {e}")
 
-    def _audio_callback(self, indata, frames, time_info, status):
+    def _audio_callback(self, indata, outdata, frames, time_info, status):
+        if self.dry_mix > 0:
+            mono = indata[:, 0] * self.dry_mix
+            outdata[:, 0] = mono
+            outdata[:, 1] = mono
+        else:
+            outdata.fill(0)
         samples = indata[:, 0].astype(np.float32)
         self._audio_buf = np.concatenate([self._audio_buf, samples])
         if len(self._audio_buf) < BUFFER_SIZE:
@@ -1275,6 +1301,19 @@ class SamplerApp:
             if note % 12 == pitch_class and sounds:
                 return random.choice(sounds), note
         return None, None
+
+    def _toggle_fullscreen(self):
+        is_full = self.root.attributes('-fullscreen')
+        self.root.attributes('-fullscreen', not is_full)
+        if not is_full:
+            self._full_btn.config(text="ON", fg=ACCENT, bg=BG_DARK)
+        else:
+            self._full_btn.config(text="OFF", fg=FG_DIM, bg=SURF2)
+
+    def _exit_fullscreen(self):
+        if self.root.attributes('-fullscreen'):
+            self.root.attributes('-fullscreen', False)
+            self._full_btn.config(text="OFF", fg=FG_DIM, bg=SURF2)
 
     def _toggle_hold(self):
         self._hold_enabled = not self._hold_enabled
