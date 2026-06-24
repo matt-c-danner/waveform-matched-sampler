@@ -220,6 +220,9 @@ class SamplerApp:
         self._fx_cache = {}             # (sound_id, reverb, delay_ms, feedback) → Sound
         self._shift_cache = {}          # (sound_id, semitones) → Sound
         self._pitch_shift_enabled = False
+        self._pitch_shift_const_len = False
+        self._hold_enabled = False
+        self._hold_timer = None
         self._reverb_ir = None
         self._reverb_ir_ffts = {}       # fft_len → rfft(ir, n=fft_len)
         self.reverb_wet = 0.0
@@ -511,6 +514,32 @@ class SamplerApp:
             font=(FONT_MONO, 8), bd=1, activebackground=SURF2,
         )
         self._pitch_shift_btn.pack(side='left', padx=(4, 0))
+
+        len_row = tk.Frame(eframe, bg=BG)
+        len_row.pack(fill='x', padx=6, pady=(0, 2))
+        len_lc = tk.Canvas(len_row, bg=BG, width=44, height=16, highlightthickness=0)
+        len_lc.pack(side='left')
+        len_lc.create_text(2, 8, text="LEN", fill=FG, font=(FONT_MONO, 9), anchor='w')
+        self._len_btn = tk.Button(
+            len_row, text="VAR", width=6,
+            command=self._toggle_const_len,
+            fg=FG_DIM, bg=SURF2, relief='groove',
+            font=(FONT_MONO, 8), bd=1, activebackground=SURF2,
+        )
+        self._len_btn.pack(side='left', padx=(4, 0))
+
+        hld_row = tk.Frame(eframe, bg=BG)
+        hld_row.pack(fill='x', padx=6, pady=(0, 4))
+        hld_lc = tk.Canvas(hld_row, bg=BG, width=44, height=16, highlightthickness=0)
+        hld_lc.pack(side='left')
+        hld_lc.create_text(2, 8, text="HLD", fill=FG, font=(FONT_MONO, 9), anchor='w')
+        self._hold_btn = tk.Button(
+            hld_row, text="OFF", width=6,
+            command=self._toggle_hold,
+            fg=FG_DIM, bg=SURF2, relief='groove',
+            font=(FONT_MONO, 8), bd=1, activebackground=SURF2,
+        )
+        self._hold_btn.pack(side='left', padx=(4, 0))
 
 
     # ── Canvas text update helpers ────────────────────────────────────────────
@@ -978,6 +1007,7 @@ class SamplerApp:
 
     def _stop(self):
         self._cancel_retrigger()
+        self._cancel_hold_timer()
         if self.stream:
             self.stream.stop()
             self.stream.close()
@@ -1095,6 +1125,8 @@ class SamplerApp:
             time.sleep(0.001)
 
     def _on_midi_note_off(self, note):
+        if self._hold_enabled:
+            return
         if note == self.current_note:
             self._on_silence()
 
@@ -1163,6 +1195,8 @@ class SamplerApp:
     def _do_key_release(self, key):
         self._release_timers.pop(key, None)
         note = self._held_keys.pop(key, None)
+        if self._hold_enabled:
+            return
         if note is not None and note == self.current_note:
             self._on_silence()
 
@@ -1180,11 +1214,14 @@ class SamplerApp:
             self._set_note_text(f"{name}  ({midi})")
             self._set_status(f"Playing {name} ({midi})")
             self._cancel_retrigger()
+            self._cancel_hold_timer()
             self._trigger(midi)
             if self.mode_var.get() == 'audio':
                 self._schedule_retrigger(midi)
 
     def _on_silence(self):
+        if self._hold_enabled:
+            return
         if self.current_note != -1:
             self.current_note = -1
             self._set_note_text("---")
@@ -1204,6 +1241,7 @@ class SamplerApp:
             return
         if self._pitch_shift_enabled and source_midi is not None and source_midi != midi:
             sound = self._pitch_shift_sound(sound, midi - source_midi)
+        dry_length = sound.get_length()  # before FX extend the duration
         if self.reverb_wet > 0 or self.delay_ms > 0:
             sound = self._get_processed_sound(sound)
         voice = self.voice_idx % self.NUM_VOICES
@@ -1218,6 +1256,8 @@ class SamplerApp:
         self._voice_samples[voice] = name
         self._set_voice_label(voice, name, active=True)
         self._flash_led(voice)
+        if self._hold_enabled and self.current_note == midi:
+            self._schedule_hold_retrigger(midi, dry_length)
 
     def _pick_sample(self, midi):
         """Returns (sound, source_midi) or (None, None)."""
@@ -1236,6 +1276,30 @@ class SamplerApp:
                 return random.choice(sounds), note
         return None, None
 
+    def _toggle_hold(self):
+        self._hold_enabled = not self._hold_enabled
+        if not self._hold_enabled:
+            self._cancel_hold_timer()
+        if self._hold_enabled:
+            self._hold_btn.config(text="ON", fg=ACCENT, bg=BG_DARK)
+        else:
+            self._hold_btn.config(text="OFF", fg=FG_DIM, bg=SURF2)
+
+    def _schedule_hold_retrigger(self, midi, length_secs):
+        self._cancel_hold_timer()
+        delay_ms = max(50, int(length_secs * 1000) - 50)
+        self._hold_timer = self.root.after(delay_ms, self._hold_continue, midi)
+
+    def _cancel_hold_timer(self):
+        if self._hold_timer is not None:
+            self.root.after_cancel(self._hold_timer)
+            self._hold_timer = None
+
+    def _hold_continue(self, midi):
+        self._hold_timer = None
+        if self._hold_enabled and self.current_note == midi:
+            self._trigger(midi)
+
     def _toggle_pitch_shift(self):
         self._pitch_shift_enabled = not self._pitch_shift_enabled
         self._shift_cache.clear()
@@ -1244,28 +1308,59 @@ class SamplerApp:
         else:
             self._pitch_shift_btn.config(text="OFF", fg=FG_DIM, bg=SURF2)
 
+    def _toggle_const_len(self):
+        self._pitch_shift_const_len = not self._pitch_shift_const_len
+        self._shift_cache.clear()
+        if self._pitch_shift_const_len:
+            self._len_btn.config(text="FIX", fg=ACCENT, bg=BG_DARK)
+        else:
+            self._len_btn.config(text="VAR", fg=FG_DIM, bg=SURF2)
+
     def _pitch_shift_sound(self, sound, semitones):
-        """Resample sound to shift pitch by semitones (tape-speed method). Cached."""
+        """Shift pitch by semitones. Tape-speed (VAR) or constant-length phase vocoder (FIX). Cached."""
         if semitones == 0:
             return sound
-        cache_key = (id(sound), semitones)
+        cache_key = (id(sound), semitones, self._pitch_shift_const_len)
         if cache_key in self._shift_cache:
             return self._shift_cache[cache_key]
+
         arr = pygame.sndarray.array(sound)
-        factor = 2.0 ** (-semitones / 12.0)
-        orig_len = arr.shape[0]
-        new_len = max(1, int(round(orig_len * factor)))
-        old_x = np.arange(orig_len, dtype=np.float32)
-        new_x = np.linspace(0, orig_len - 1, new_len, dtype=np.float32)
-        if arr.ndim == 1:
-            resampled = np.interp(new_x, old_x, arr.astype(np.float32)).astype(arr.dtype)
-        else:
-            resampled = np.column_stack([
-                np.interp(new_x, old_x, arr[:, ch].astype(np.float32)).astype(arr.dtype)
-                for ch in range(arr.shape[1])
-            ])
-        shifted = pygame.sndarray.make_sound(resampled)
         base_name = self._sound_names.get(id(sound), '?')
+
+        if self._pitch_shift_const_len and LIBROSA_OK:
+            # Phase vocoder: preserves length, true pitch shift
+            scale = 1.0 / 32768.0
+            if arr.ndim == 1:
+                f = arr.astype(np.float32) * scale
+                shifted_f = librosa.effects.pitch_shift(f, sr=SAMPLE_RATE, n_steps=semitones)
+                result = np.clip(shifted_f / scale, -32768, 32767).astype(arr.dtype)
+            else:
+                channels = [
+                    librosa.effects.pitch_shift(
+                        arr[:, ch].astype(np.float32) * scale,
+                        sr=SAMPLE_RATE, n_steps=semitones,
+                    )
+                    for ch in range(arr.shape[1])
+                ]
+                result = np.clip(
+                    np.column_stack(channels) / scale, -32768, 32767
+                ).astype(arr.dtype)
+        else:
+            # Tape-speed resampling: fast, changes duration
+            factor = 2.0 ** (-semitones / 12.0)
+            orig_len = arr.shape[0]
+            new_len = max(1, int(round(orig_len * factor)))
+            old_x = np.arange(orig_len, dtype=np.float32)
+            new_x = np.linspace(0, orig_len - 1, new_len, dtype=np.float32)
+            if arr.ndim == 1:
+                result = np.interp(new_x, old_x, arr.astype(np.float32)).astype(arr.dtype)
+            else:
+                result = np.column_stack([
+                    np.interp(new_x, old_x, arr[:, ch].astype(np.float32)).astype(arr.dtype)
+                    for ch in range(arr.shape[1])
+                ])
+
+        shifted = pygame.sndarray.make_sound(result)
         self._sound_names[id(shifted)] = f"{base_name}[{semitones:+d}]"
         self._shift_cache[cache_key] = shifted
         return shifted
