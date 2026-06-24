@@ -26,6 +26,7 @@ $PYTHON -m PyInstaller \
   --collect-all=rtmidi \
   --exclude-module numba \
   --exclude-module llvmlite \
+  --add-data "brain_bg.png:." \
   -y \
   waveform_matched_sampler.py
 

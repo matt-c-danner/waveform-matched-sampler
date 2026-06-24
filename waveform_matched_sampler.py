@@ -208,6 +208,13 @@ def _short_path(path):
     return p
 
 
+def _get_resource_path(filename):
+    """Locate a bundled resource whether running as script or PyInstaller .app."""
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, filename)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+
+
 class SamplerApp:
     NUM_VOICES = 4
 
@@ -231,6 +238,10 @@ class SamplerApp:
         self._arp_dir = 'UP'
         self._arp_rate_ms = 200
         self._midi_held = set()
+        self._marquee_items = []
+        self._marquee_queue = []
+        self._brain_canvas = None
+        self._brain_photo = None
         self._reverb_ir = None
         self._reverb_ir_ffts = {}       # fft_len → rfft(ir, n=fft_len)
         self.reverb_wet = 0.0
@@ -307,69 +318,56 @@ class SamplerApp:
     def _build_ui(self):
         self.root.configure(bg=BG)
         self.root.resizable(True, True)
-        self.root.minsize(400, 600)
+        self.root.minsize(760, 600)
         self.root.bind_all('<Command-f>', lambda e: self._toggle_fullscreen())
         self.root.bind_all('<F11>',       lambda e: self._toggle_fullscreen())
         self.root.bind_all('<Escape>',    lambda e: self._exit_fullscreen())
 
-        # ── Title bar ────────────────────────────────────────────────────────
-        title_c = tk.Canvas(self.root, bg=BG, width=360, height=24, highlightthickness=0)
-        title_c.pack(pady=(10, 2))
-        title_c.create_text(180, 12, text="WAVEFORM  MATCHED  SAMPLER",
-                            fill=ACCENT, font=(FONT_MONO, 11, "bold"), anchor='center')
+        # ── Top row: note display (left) + brain image (right) ───────────────
+        # Inner width = 760 - 14*2 = 732. lcd_outer = 202px (1+200+1), gap=4 → brain=526.
+        top_row = tk.Frame(self.root, bg=BG)
+        top_row.pack(fill='x', padx=14, pady=(10, 4))
 
-        # ── LCD note display ─────────────────────────────────────────────────
-        lcd_border = tk.Frame(self.root, bg=BORDER, padx=1, pady=1)
-        lcd_border.pack(padx=14, pady=(2, 0))
-        note_c = tk.Canvas(lcd_border, bg=BG_DARK, width=338, height=72, highlightthickness=0)
-        note_c.pack()
-        self._note_canvas = note_c
-        self._note_text_id = note_c.create_text(169, 36, text="---",
-                                                 fill=ACCENT,
-                                                 font=(FONT_MONO, 38, "bold"),
-                                                 anchor='center')
+        # Left: LCD note panel ────────────────────────────────────────────────
+        lcd_outer = tk.Frame(top_row, bg=BORDER, padx=1, pady=1)
+        lcd_outer.pack(side='left', padx=(0, 4))
+        lcd_panel = tk.Canvas(lcd_outer, bg=BG_DARK, width=200, height=265,
+                              highlightthickness=0)
+        lcd_panel.pack()
+        self._note_canvas = lcd_panel
+        self._status_canvas = lcd_panel
+        lcd_panel.create_text(100, 16, text="WAVEFORM MATCHED SAMPLER",
+                              fill=FG_DIM, font=(FONT_MONO, 7, "bold"),
+                              anchor='center', width=190)
+        self._note_text_id = lcd_panel.create_text(100, 126, text="---",
+                                                    fill=ACCENT,
+                                                    font=(FONT_MONO, 26, "bold"),
+                                                    anchor='center')
+        self._status_text_id = lcd_panel.create_text(6, 252, text="STARTING...",
+                                                      fill=FG_DIM,
+                                                      font=(FONT_MONO, 8),
+                                                      anchor='w', width=188)
 
-        # ── Status line ───────────────────────────────────────────────────────
-        status_c = tk.Canvas(self.root, bg=BG, width=360, height=18, highlightthickness=0)
-        status_c.pack(pady=(3, 0))
-        self._status_canvas = status_c
-        self._status_text_id = status_c.create_text(6, 9, text="STARTING...",
-                                                     fill=FG_DIM,
-                                                     font=(FONT_MONO, 9),
-                                                     anchor='w', width=350)
-
-        # ── Voice channel indicators ──────────────────────────────────────────
-        voice_row = tk.Frame(self.root, bg=BG)
-        voice_row.pack(pady=(4, 2))
-        ch_c = tk.Canvas(voice_row, bg=BG, width=36, height=16, highlightthickness=0)
-        ch_c.pack(side='left', padx=(8, 2))
-        ch_c.create_text(2, 8, text="CH:", fill=FG_DIM, font=(FONT_MONO, 8), anchor='w')
         self.voice_leds = []
-        for i in range(self.NUM_VOICES):
-            lc = tk.Canvas(voice_row, bg=BG, width=28, height=16, highlightthickness=0)
-            lc.pack(side='left', padx=2)
-            rid = lc.create_rectangle(1, 1, 27, 15, fill=BG_DARK, outline=BORDER)
-            tid = lc.create_text(14, 8, text=str(i + 1), fill=FG_DIMR,
-                                 font=(FONT_MONO, 8, "bold"), anchor='center')
-            self.voice_leds.append({'canvas': lc, 'rect': rid, 'text': tid})
 
-        # ── Now Playing ───────────────────────────────────────────────────────
-        np_frame = tk.LabelFrame(self.root, text=" NOW PLAYING ",
-                                 fg=FG_DIM, bg=BG, font=(FONT_MONO, 7, "bold"))
-        np_frame.pack(fill='x', padx=14, pady=(2, 3))
-        self._voice_label_items = []
-        for i in range(self.NUM_VOICES):
-            row = tk.Frame(np_frame, bg=BG)
-            row.pack(fill='x', padx=4)
-            num_c = tk.Canvas(row, bg=BG, width=14, height=14, highlightthickness=0)
-            num_c.pack(side='left')
-            num_c.create_text(7, 7, text=str(i + 1), fill=FG_DIMR,
-                              font=(FONT_MONO, 7, "bold"), anchor='center')
-            name_c = tk.Canvas(row, bg=BG, width=332, height=14, highlightthickness=0)
-            name_c.pack(side='left')
-            tid = name_c.create_text(2, 7, text="---", fill=FG_DIM,
-                                     font=(FONT_MONO, 8), anchor='w')
-            self._voice_label_items.append((name_c, tid))
+        # Right: brain image with marquee ─────────────────────────────────────
+        self._head_x = 257
+        self._head_y = 126   # ~50px higher than before
+        try:
+            from PIL import Image as _PILImage, ImageTk as _ImageTk
+            _path = _get_resource_path('brain_bg.png')
+            _orig = _PILImage.open(_path)
+            _scaled_h = int(_orig.height * 526 / _orig.width)
+            _pil = _orig.resize((526, _scaled_h), _PILImage.LANCZOS).crop((0, 0, 526, 267))
+            self._brain_photo = _ImageTk.PhotoImage(_pil)
+            brain_c = tk.Canvas(top_row, bg=BG, width=526, height=267,
+                                highlightthickness=0)
+            brain_c.pack(side='left')
+            brain_c.create_image(0, 0, anchor='nw', image=self._brain_photo)
+            self._brain_canvas = brain_c
+            self.root.after(100, self._tick_marquee)
+        except Exception:
+            self._brain_canvas = None
 
         # ── Sample Bank ───────────────────────────────────────────────────────
         bframe = tk.LabelFrame(self.root, text=" SAMPLE BANK ",
@@ -378,7 +376,7 @@ class SamplerApp:
 
         path_row = tk.Frame(bframe, bg=BG)
         path_row.pack(fill='x', padx=4, pady=(3, 0))
-        bank_c = tk.Canvas(path_row, bg=BG_DARK, width=258, height=16, highlightthickness=0)
+        bank_c = tk.Canvas(path_row, bg=BG_DARK, width=560, height=16, highlightthickness=0)
         bank_c.pack(side='left')
         self._bank_canvas = bank_c
         self._bank_text_id = bank_c.create_text(4, 8,
@@ -390,7 +388,7 @@ class SamplerApp:
                   bg=SURFACE, fg=FG, relief='groove', font=(FONT_MONO, 7),
                   activebackground=SURF2, pady=0).pack(side='right')
 
-        count_c = tk.Canvas(bframe, bg=BG, width=340, height=14, highlightthickness=0)
+        count_c = tk.Canvas(bframe, bg=BG, width=700, height=14, highlightthickness=0)
         count_c.pack(anchor='w', padx=4)
         self._count_canvas = count_c
         self._count_text_id = count_c.create_text(2, 7, text="",
@@ -412,7 +410,7 @@ class SamplerApp:
                                     command=self._clear_bank, fg=FG_DIM, **_btn_kw)
         self._clear_btn.pack(side='right')
 
-        prog_c = tk.Canvas(bframe, bg=BG, width=340, height=13, highlightthickness=0)
+        prog_c = tk.Canvas(bframe, bg=BG, width=700, height=13, highlightthickness=0)
         prog_c.pack(anchor='w', padx=4, pady=(0, 3))
         self._prog_canvas = prog_c
         self._prog_text_id = prog_c.create_text(2, 6, text="",
@@ -486,10 +484,13 @@ class SamplerApp:
                                                       anchor='center')
         self.kb_frame.pack(fill='x')  # shown by default (keyboard mode)
 
-        # ── Effects ───────────────────────────────────────────────────────────
-        eframe = tk.LabelFrame(self.root, text=" EFFECTS ",
+        # ── Effects + Arpeggiator (side by side) ─────────────────────────────
+        ea_frame = tk.Frame(self.root, bg=BG)
+        ea_frame.pack(fill='x', padx=14, pady=(3, 10))
+
+        eframe = tk.LabelFrame(ea_frame, text=" EFFECTS ",
                                fg=FG_DIM, bg=BG, font=(FONT_MONO, 7, "bold"))
-        eframe.pack(fill='x', padx=14, pady=(3, 10))
+        eframe.pack(side='left', fill='both', expand=True, padx=(0, 4))
 
         def _fx_row(label, unit, from_, to, default, on_change):
             row = tk.Frame(eframe, bg=BG)
@@ -499,7 +500,7 @@ class SamplerApp:
             lc.create_text(2, 8, text=label, fill=FG, font=(FONT_MONO, 9), anchor='w')
             var = tk.IntVar(value=default)
             tk.Scale(row, variable=var, from_=from_, to=to,
-                     orient='horizontal', length=238, bg=BG, fg=ACCENT,
+                     orient='horizontal', length=240, bg=BG, fg=ACCENT,
                      troughcolor=BG_DARK, highlightthickness=0, showvalue=1,
                      font=(FONT_MONO, 7),
                      command=on_change).pack(side='left')
@@ -517,108 +518,42 @@ class SamplerApp:
         self.feedback_var = _fx_row("FBK", "%",  0,  90, 50,
                                     lambda v: setattr(self, 'delay_feedback', int(float(v)) / 100.0))
 
-        ps_row = tk.Frame(eframe, bg=BG)
-        ps_row.pack(fill='x', padx=6, pady=(2, 4))
-        ps_lc = tk.Canvas(ps_row, bg=BG, width=44, height=16, highlightthickness=0)
-        ps_lc.pack(side='left')
-        ps_lc.create_text(2, 8, text="PSH", fill=FG, font=(FONT_MONO, 9), anchor='w')
-        self._pitch_shift_btn = tk.Button(
-            ps_row, text="OFF", width=6,
-            command=self._toggle_pitch_shift,
-            fg=FG_DIM, bg=SURF2, relief='groove',
-            font=(FONT_MONO, 8), bd=1, activebackground=SURF2,
-        )
-        self._pitch_shift_btn.pack(side='left', padx=(4, 0))
+        def _tog_row(parent, label, text, command, accent=False):
+            row = tk.Frame(parent, bg=BG)
+            row.pack(fill='x', padx=6, pady=(0, 3))
+            lc = tk.Canvas(row, bg=BG, width=44, height=16, highlightthickness=0)
+            lc.pack(side='left')
+            lc.create_text(2, 8, text=label, fill=FG, font=(FONT_MONO, 9), anchor='w')
+            btn = tk.Button(row, text=text, width=6, command=command,
+                            fg=ACCENT if accent else FG_DIM,
+                            bg=BG_DARK if accent else SURF2,
+                            relief='groove', font=(FONT_MONO, 8), bd=1,
+                            activebackground=SURF2)
+            btn.pack(side='left', padx=(4, 0))
+            return btn
 
-        len_row = tk.Frame(eframe, bg=BG)
-        len_row.pack(fill='x', padx=6, pady=(0, 2))
-        len_lc = tk.Canvas(len_row, bg=BG, width=44, height=16, highlightthickness=0)
-        len_lc.pack(side='left')
-        len_lc.create_text(2, 8, text="LEN", fill=FG, font=(FONT_MONO, 9), anchor='w')
-        self._len_btn = tk.Button(
-            len_row, text="VAR", width=6,
-            command=self._toggle_const_len,
-            fg=FG_DIM, bg=SURF2, relief='groove',
-            font=(FONT_MONO, 8), bd=1, activebackground=SURF2,
-        )
-        self._len_btn.pack(side='left', padx=(4, 0))
-
-        hld_row = tk.Frame(eframe, bg=BG)
-        hld_row.pack(fill='x', padx=6, pady=(0, 4))
-        hld_lc = tk.Canvas(hld_row, bg=BG, width=44, height=16, highlightthickness=0)
-        hld_lc.pack(side='left')
-        hld_lc.create_text(2, 8, text="HLD", fill=FG, font=(FONT_MONO, 9), anchor='w')
-        self._hold_btn = tk.Button(
-            hld_row, text="OFF", width=6,
-            command=self._toggle_hold,
-            fg=FG_DIM, bg=SURF2, relief='groove',
-            font=(FONT_MONO, 8), bd=1, activebackground=SURF2,
-        )
-        self._hold_btn.pack(side='left', padx=(4, 0))
-
-        full_row = tk.Frame(eframe, bg=BG)
-        full_row.pack(fill='x', padx=6, pady=(0, 4))
-        full_lc = tk.Canvas(full_row, bg=BG, width=44, height=16, highlightthickness=0)
-        full_lc.pack(side='left')
-        full_lc.create_text(2, 8, text="FULL", fill=FG, font=(FONT_MONO, 9), anchor='w')
-        self._full_btn = tk.Button(
-            full_row, text="OFF", width=6,
-            command=self._toggle_fullscreen,
-            fg=FG_DIM, bg=SURF2, relief='groove',
-            font=(FONT_MONO, 8), bd=1, activebackground=SURF2,
-        )
-        self._full_btn.pack(side='left', padx=(4, 0))
-
+        self._pitch_shift_btn = _tog_row(eframe, "PSH", "OFF", self._toggle_pitch_shift)
+        self._len_btn         = _tog_row(eframe, "LEN", "VAR", self._toggle_const_len)
+        self._hold_btn        = _tog_row(eframe, "HLD", "OFF", self._toggle_hold)
+        self._full_btn        = _tog_row(eframe, "FULL", "OFF", self._toggle_fullscreen)
 
         # ── Arpeggiator ──────────────────────────────────────────────────────
-        aframe = tk.LabelFrame(self.root, text=" ARPEGGIATOR ",
+        aframe = tk.LabelFrame(ea_frame, text=" ARPEGGIATOR ",
                                fg=FG_DIM, bg=BG, font=(FONT_MONO, 7, "bold"))
-        aframe.pack(fill='x', padx=14, pady=(0, 10))
+        aframe.pack(side='left', fill='both', expand=True, padx=(4, 0))
 
-        arp_row = tk.Frame(aframe, bg=BG)
-        arp_row.pack(fill='x', padx=6, pady=(4, 1))
-        arp_lc = tk.Canvas(arp_row, bg=BG, width=44, height=16, highlightthickness=0)
-        arp_lc.pack(side='left')
-        arp_lc.create_text(2, 8, text="ARP", fill=FG, font=(FONT_MONO, 9), anchor='w')
-        self._arp_btn = tk.Button(
-            arp_row, text="OFF", width=6, command=self._toggle_arp,
-            fg=FG_DIM, bg=SURF2, relief='groove',
-            font=(FONT_MONO, 8), bd=1, activebackground=SURF2,
-        )
-        self._arp_btn.pack(side='left', padx=(4, 0))
-
-        arp_hld_row = tk.Frame(aframe, bg=BG)
-        arp_hld_row.pack(fill='x', padx=6, pady=1)
-        arp_hld_lc = tk.Canvas(arp_hld_row, bg=BG, width=44, height=16, highlightthickness=0)
-        arp_hld_lc.pack(side='left')
-        arp_hld_lc.create_text(2, 8, text="HLD", fill=FG, font=(FONT_MONO, 9), anchor='w')
-        self._arp_hold_btn = tk.Button(
-            arp_hld_row, text="OFF", width=6, command=self._toggle_arp_hold,
-            fg=FG_DIM, bg=SURF2, relief='groove',
-            font=(FONT_MONO, 8), bd=1, activebackground=SURF2,
-        )
-        self._arp_hold_btn.pack(side='left', padx=(4, 0))
-
-        dir_row = tk.Frame(aframe, bg=BG)
-        dir_row.pack(fill='x', padx=6, pady=1)
-        dir_lc = tk.Canvas(dir_row, bg=BG, width=44, height=16, highlightthickness=0)
-        dir_lc.pack(side='left')
-        dir_lc.create_text(2, 8, text="DIR", fill=FG, font=(FONT_MONO, 9), anchor='w')
-        self._arp_dir_btn = tk.Button(
-            dir_row, text="UP", width=6, command=self._cycle_arp_dir,
-            fg=ACCENT, bg=SURF2, relief='groove',
-            font=(FONT_MONO, 8), bd=1, activebackground=SURF2,
-        )
-        self._arp_dir_btn.pack(side='left', padx=(4, 0))
+        self._arp_btn      = _tog_row(aframe, "ARP",  "OFF", self._toggle_arp)
+        self._arp_hold_btn = _tog_row(aframe, "HLD",  "OFF", self._toggle_arp_hold)
+        self._arp_dir_btn  = _tog_row(aframe, "DIR",  "UP",  self._cycle_arp_dir, accent=True)
 
         rate_row = tk.Frame(aframe, bg=BG)
-        rate_row.pack(fill='x', padx=6, pady=(1, 6))
+        rate_row.pack(fill='x', padx=6, pady=(0, 6))
         rate_lc = tk.Canvas(rate_row, bg=BG, width=44, height=16, highlightthickness=0)
         rate_lc.pack(side='left')
         rate_lc.create_text(2, 8, text="RATE", fill=FG, font=(FONT_MONO, 9), anchor='w')
         self._arp_rate_var = tk.IntVar(value=200)
         tk.Scale(rate_row, variable=self._arp_rate_var, from_=50, to=1000,
-                 orient='horizontal', length=238, bg=BG, fg=ACCENT,
+                 orient='horizontal', length=200, bg=BG, fg=ACCENT,
                  troughcolor=BG_DARK, highlightthickness=0, showvalue=1,
                  font=(FONT_MONO, 7),
                  command=lambda v: setattr(self, '_arp_rate_ms', int(float(v)))
@@ -626,6 +561,33 @@ class SamplerApp:
         rate_uc = tk.Canvas(rate_row, bg=BG, width=26, height=16, highlightthickness=0)
         rate_uc.pack(side='left')
         rate_uc.create_text(2, 8, text="ms", fill=FG_DIM, font=(FONT_MONO, 8), anchor='w')
+
+    # ── Brain marquee ─────────────────────────────────────────────────────────
+
+    def _tick_marquee(self):
+        if self._brain_canvas is None:
+            return
+        # Spawn one queued name per tick so items don't start at the same position
+        if self._marquee_queue:
+            name = self._marquee_queue.pop(0)
+            item_id = self._brain_canvas.create_text(
+                self._head_x, float(self._head_y),
+                text=name, fill=ACCENT,
+                font=(FONT_MONO, 8, "bold"),
+                anchor='s',
+            )
+            self._marquee_items.append({'id': item_id, 'y': float(self._head_y)})
+        # Scroll all items upward
+        dead = []
+        for item in self._marquee_items:
+            item['y'] -= 1.5
+            self._brain_canvas.coords(item['id'], self._head_x, item['y'])
+            if item['y'] < -16:
+                dead.append(item)
+        for item in dead:
+            self._brain_canvas.delete(item['id'])
+            self._marquee_items.remove(item)
+        self.root.after(50, self._tick_marquee)
 
     # ── Canvas text update helpers ────────────────────────────────────────────
 
@@ -1359,8 +1321,8 @@ class SamplerApp:
         self._voice_xfaded[voice] = False
         name = self._sound_names.get(id(sound), '?')
         self._voice_samples[voice] = name
-        self._set_voice_label(voice, name, active=True)
         self._flash_led(voice)
+        self._marquee_queue.append(name)
         if self._hold_enabled and self.current_note == midi:
             self._schedule_hold_retrigger(midi, dry_length)
 
@@ -1662,13 +1624,6 @@ class SamplerApp:
         result = np.stack(out, axis=1) if stereo else out[0]
         return np.clip(result * 32768.0, -32768, 32767).astype(np.int16)
 
-    # ── Now-playing display ───────────────────────────────────────────────────
-
-    def _set_voice_label(self, idx, name, active=False):
-        canvas, tid = self._voice_label_items[idx]
-        display = name if len(name) <= 46 else name[:43] + '…'
-        canvas.itemconfig(tid, text=display, fill=FG if active else FG_DIM)
-
     def _poll_voices(self):
         now = time.time()
         for i in range(self.NUM_VOICES):
@@ -1680,7 +1635,6 @@ class SamplerApp:
                     self._voice_samples[i] = '---'
                     self._voice_sound_obj[i] = None
                     self._voice_note[i] = -1
-                    self._set_voice_label(i, '---', active=False)
                 continue
 
             # Crossfade: start next sample when this one is nearly done
@@ -1704,6 +1658,8 @@ class SamplerApp:
     # ── LED helpers ──────────────────────────────────────────────────────────
 
     def _flash_led(self, idx):
+        if idx >= len(self.voice_leds):
+            return
         led = self.voice_leds[idx]
         led['canvas'].itemconfig(led['rect'], fill=ACCENT)
         led['canvas'].itemconfig(led['text'], fill=BG_DARK)
