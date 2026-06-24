@@ -223,6 +223,14 @@ class SamplerApp:
         self._pitch_shift_const_len = False
         self._hold_enabled = False
         self._hold_timer = None
+        self._arp_enabled = False
+        self._arp_hold = False
+        self._arp_held_notes = []
+        self._arp_timer = None
+        self._arp_index = 0
+        self._arp_dir = 'UP'
+        self._arp_rate_ms = 200
+        self._midi_held = set()
         self._reverb_ir = None
         self._reverb_ir_ffts = {}       # fft_len → rfft(ir, n=fft_len)
         self.reverb_wet = 0.0
@@ -561,6 +569,63 @@ class SamplerApp:
         )
         self._full_btn.pack(side='left', padx=(4, 0))
 
+
+        # ── Arpeggiator ──────────────────────────────────────────────────────
+        aframe = tk.LabelFrame(self.root, text=" ARPEGGIATOR ",
+                               fg=FG_DIM, bg=BG, font=(FONT_MONO, 7, "bold"))
+        aframe.pack(fill='x', padx=14, pady=(0, 10))
+
+        arp_row = tk.Frame(aframe, bg=BG)
+        arp_row.pack(fill='x', padx=6, pady=(4, 1))
+        arp_lc = tk.Canvas(arp_row, bg=BG, width=44, height=16, highlightthickness=0)
+        arp_lc.pack(side='left')
+        arp_lc.create_text(2, 8, text="ARP", fill=FG, font=(FONT_MONO, 9), anchor='w')
+        self._arp_btn = tk.Button(
+            arp_row, text="OFF", width=6, command=self._toggle_arp,
+            fg=FG_DIM, bg=SURF2, relief='groove',
+            font=(FONT_MONO, 8), bd=1, activebackground=SURF2,
+        )
+        self._arp_btn.pack(side='left', padx=(4, 0))
+
+        arp_hld_row = tk.Frame(aframe, bg=BG)
+        arp_hld_row.pack(fill='x', padx=6, pady=1)
+        arp_hld_lc = tk.Canvas(arp_hld_row, bg=BG, width=44, height=16, highlightthickness=0)
+        arp_hld_lc.pack(side='left')
+        arp_hld_lc.create_text(2, 8, text="HLD", fill=FG, font=(FONT_MONO, 9), anchor='w')
+        self._arp_hold_btn = tk.Button(
+            arp_hld_row, text="OFF", width=6, command=self._toggle_arp_hold,
+            fg=FG_DIM, bg=SURF2, relief='groove',
+            font=(FONT_MONO, 8), bd=1, activebackground=SURF2,
+        )
+        self._arp_hold_btn.pack(side='left', padx=(4, 0))
+
+        dir_row = tk.Frame(aframe, bg=BG)
+        dir_row.pack(fill='x', padx=6, pady=1)
+        dir_lc = tk.Canvas(dir_row, bg=BG, width=44, height=16, highlightthickness=0)
+        dir_lc.pack(side='left')
+        dir_lc.create_text(2, 8, text="DIR", fill=FG, font=(FONT_MONO, 9), anchor='w')
+        self._arp_dir_btn = tk.Button(
+            dir_row, text="UP", width=6, command=self._cycle_arp_dir,
+            fg=ACCENT, bg=SURF2, relief='groove',
+            font=(FONT_MONO, 8), bd=1, activebackground=SURF2,
+        )
+        self._arp_dir_btn.pack(side='left', padx=(4, 0))
+
+        rate_row = tk.Frame(aframe, bg=BG)
+        rate_row.pack(fill='x', padx=6, pady=(1, 6))
+        rate_lc = tk.Canvas(rate_row, bg=BG, width=44, height=16, highlightthickness=0)
+        rate_lc.pack(side='left')
+        rate_lc.create_text(2, 8, text="RATE", fill=FG, font=(FONT_MONO, 9), anchor='w')
+        self._arp_rate_var = tk.IntVar(value=200)
+        tk.Scale(rate_row, variable=self._arp_rate_var, from_=50, to=1000,
+                 orient='horizontal', length=238, bg=BG, fg=ACCENT,
+                 troughcolor=BG_DARK, highlightthickness=0, showvalue=1,
+                 font=(FONT_MONO, 7),
+                 command=lambda v: setattr(self, '_arp_rate_ms', int(float(v)))
+                 ).pack(side='left')
+        rate_uc = tk.Canvas(rate_row, bg=BG, width=26, height=16, highlightthickness=0)
+        rate_uc.pack(side='left')
+        rate_uc.create_text(2, 8, text="ms", fill=FG_DIM, font=(FONT_MONO, 8), anchor='w')
 
     # ── Canvas text update helpers ────────────────────────────────────────────
 
@@ -1028,6 +1093,8 @@ class SamplerApp:
     def _stop(self):
         self._cancel_retrigger()
         self._cancel_hold_timer()
+        self._cancel_arp()
+        self._midi_held.clear()
         if self.stream:
             self.stream.stop()
             self.stream.close()
@@ -1133,8 +1200,10 @@ class SamplerApp:
                         note   = data[1] if len(data) > 1 else 0
                         vel    = data[2] if len(data) > 2 else 0
                         if status == 0x90 and vel > 0:
+                            self._midi_held.add(note)
                             self.root.after(0, self._on_note, note)
                         elif status == 0x80 or (status == 0x90 and vel == 0):
+                            self._midi_held.discard(note)
                             self.root.after(0, self._on_midi_note_off, note)
                 else:
                     if self._midi_input and self._midi_input.poll():
@@ -1143,8 +1212,10 @@ class SamplerApp:
                             note   = event[0][1]
                             vel    = event[0][2]
                             if status == 0x90 and vel > 0:
+                                self._midi_held.add(note)
                                 self.root.after(0, self._on_note, note)
                             elif status == 0x80 or (status == 0x90 and vel == 0):
+                                self._midi_held.discard(note)
                                 self.root.after(0, self._on_midi_note_off, note)
             except Exception:
                 break
@@ -1234,6 +1305,14 @@ class SamplerApp:
     # ── Note events ──────────────────────────────────────────────────────────
 
     def _on_note(self, midi):
+        if self._arp_enabled:
+            if self._arp_hold and midi not in self._arp_held_notes:
+                self._arp_held_notes.append(midi)
+                self._arp_held_notes.sort()
+            if self._arp_timer is None:
+                self._arp_index = 0
+                self._arp_step()
+            return
         if midi != self.current_note:
             self.current_note = midi
             name = midi_to_name(midi)
@@ -1301,6 +1380,89 @@ class SamplerApp:
             if note % 12 == pitch_class and sounds:
                 return random.choice(sounds), note
         return None, None
+
+    def _toggle_arp(self):
+        self._arp_enabled = not self._arp_enabled
+        if self._arp_enabled:
+            self._arp_btn.config(text="ON", fg=ACCENT, bg=BG_DARK)
+            self._arp_index = 0
+            self._arp_step()
+        else:
+            self._arp_btn.config(text="OFF", fg=FG_DIM, bg=SURF2)
+            self._cancel_arp()
+
+    def _toggle_arp_hold(self):
+        self._arp_hold = not self._arp_hold
+        if self._arp_hold:
+            self._arp_held_notes = self._arp_get_notes()
+            self._arp_hold_btn.config(text="ON", fg=ACCENT, bg=BG_DARK)
+        else:
+            self._arp_held_notes = []
+            self._arp_hold_btn.config(text="OFF", fg=FG_DIM, bg=SURF2)
+
+    def _cancel_arp(self):
+        if self._arp_timer is not None:
+            self.root.after_cancel(self._arp_timer)
+            self._arp_timer = None
+
+    def _cycle_arp_dir(self):
+        dirs = ['UP', 'DWN', 'U+D', 'RND']
+        self._arp_dir = dirs[(dirs.index(self._arp_dir) + 1) % len(dirs)]
+        self._arp_index = 0
+        self._arp_dir_btn.config(text=self._arp_dir)
+
+    def _arp_get_notes(self):
+        if self._arp_hold and self._arp_held_notes:
+            return list(self._arp_held_notes)
+        mode = self.mode_var.get()
+        if mode == 'keyboard':
+            notes = sorted(set(self._held_keys.values()))
+        elif mode == 'midi':
+            notes = sorted(self._midi_held)
+        else:
+            notes = [self.current_note] if self.current_note != -1 else []
+        if not notes and self._hold_enabled and self.current_note != -1:
+            notes = [self.current_note]
+        return notes
+
+    def _arp_next_note(self, notes):
+        n = len(notes)
+        if n == 0:
+            return None
+        if self._arp_dir == 'RND':
+            return random.choice(notes)
+        if self._arp_dir == 'UP':
+            note = notes[self._arp_index % n]
+            self._arp_index = (self._arp_index + 1) % n
+            return note
+        if self._arp_dir == 'DWN':
+            note = notes[n - 1 - (self._arp_index % n)]
+            self._arp_index = (self._arp_index + 1) % n
+            return note
+        if self._arp_dir == 'U+D':
+            if n == 1:
+                return notes[0]
+            cycle = (n - 1) * 2
+            pos = self._arp_index % cycle
+            idx = pos if pos < n else cycle - pos
+            self._arp_index += 1
+            return notes[idx]
+        return notes[0]
+
+    def _arp_step(self):
+        if not self._arp_enabled:
+            return
+        notes = self._arp_get_notes()
+        if notes:
+            if self._arp_index >= len(notes) and self._arp_dir != 'RND':
+                self._arp_index = 0
+            note = self._arp_next_note(notes)
+            if note is not None:
+                self.current_note = note
+                name = midi_to_name(note)
+                self._set_note_text(f"{name}  ({note})")
+                self._trigger(note)
+        self._arp_timer = self.root.after(self._arp_rate_ms, self._arp_step)
 
     def _toggle_fullscreen(self):
         is_full = self.root.attributes('-fullscreen')
